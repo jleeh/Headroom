@@ -237,6 +237,9 @@ static class Installer
         // an upgrade keeps the user's fan curve running if it was set to start at logon
         if (App.Run("schtasks.exe", "/query /tn \"Headroom Fan Curve\"", 10000).Contains("Headroom Fan Curve"))
             App.Run("schtasks.exe", "/run /tn \"Headroom Fan Curve\"", 10000);
+        // an upgrade stopped everything running from this folder: start the sensor app again too (one copy)
+        if (App.Run("schtasks.exe", "/query /tn \"Headroom Sensors\"", 10000).Contains("Headroom Sensors"))
+            App.Run("schtasks.exe", "/run /tn \"Headroom Sensors\"", 10000);
         progress(100, "Done");
         if (launch) Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = dir });
     }

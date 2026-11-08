@@ -540,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype="application/json", extra=None):
+    def _send(self, code, body, ctype="application/json"):
         data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -593,16 +593,8 @@ class Handler(BaseHTTPRequestHandler):
                  "svg": "image/svg+xml", "ico": "image/x-icon"}.get(ext, "application/octet-stream")
         with open(f, "rb") as fh:
             data = fh.read()
-        extra = {}
-        if ext == "html":
-            # only the page's own <script> blocks run: injected markup can't execute script
-            nonce = secrets.token_urlsafe(18)
-            data = data.replace(b"<script>", ('<script nonce="%s">' % nonce).encode())
-            extra["Content-Security-Policy"] = (
-                "default-src 'none'; script-src 'nonce-%s'; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
-                "base-uri 'none'; form-action 'none'; frame-ancestors 'none'" % nonce)
-        self._send(200, data, ctype + ("; charset=utf-8" if ctype.startswith("text") else ""), extra)
+        # HTML gets the strict CSP in _send: scripts only from files served here (web/app.js)
+        self._send(200, data, ctype + ("; charset=utf-8" if ctype.startswith("text") else ""))
 
     def _body(self):
         """JSON only: a cross-site 'simple' request (text/plain, form) is refused outright."""

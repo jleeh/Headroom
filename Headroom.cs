@@ -105,7 +105,7 @@ class Headroom
                 win.Shown += (s, e) => splash.Close();
                 Application.Run(win);
             }
-            try { using (var wc = new WebClient()) { wc.Headers["X-Headroom-Token"] = Token; wc.UploadString(Url + "api/shutdown", "{}"); } } catch { }
+            try { using (var wc = new WebClient()) { wc.Headers["X-Headroom-Token"] = Token; wc.Headers["Content-Type"] = "application/json"; wc.UploadString(Url + "api/shutdown", "{}"); } } catch { }
             if (py != null) { try { if (!py.WaitForExit(20000)) py.Kill(); } catch { } }
         }
     }

@@ -19,13 +19,15 @@ from .nvml import CLK_GRAPHICS, CLK_MEM, Nvml
 from .sensors import Telemetry
 
 PORT = int(os.environ.get("HEADROOM_PORT") or 7871)
-# Per-launch secret. Headroom.exe (elevated) makes it, hands it over in the environment and adds it
-# to every request the window makes, so no web page and no non-admin process can drive this
-# elevated API. Removed from the environment so tools started from here never inherit it.
+# Per-launch secret from Headroom.exe (an elevated process's environment can't be read by
+# non-elevated programs). Every /api call must carry it, so web pages (CSRF / DNS
+# rebinding) and unprivileged local programs can't drive this administrator process.
 TOKEN = os.environ.pop("HEADROOM_TOKEN", "") or secrets.token_hex(32)
-HOSTS = {"127.0.0.1:%d" % PORT, "localhost:%d" % PORT}
+ALLOWED_HOSTS = {"127.0.0.1:%d" % PORT, "localhost:%d" % PORT}
 ORIGIN = "http://127.0.0.1:%d" % PORT
-MAX_BODY = 1 << 20
+MAX_BODY = 256 * 1024
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 WEB = os.path.join(APP_DIR, "web")
 GPU_TASK = "Headroom GPU Apply"
 PYW = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
@@ -211,8 +213,13 @@ class Controller:
         def prog(ph, msg, fr):
             self.gpu_prog = {"phase": ph, "msg": msg, "frac": fr if fr is not None else self.gpu_prog.get("frac", 0)}
         self.gpu_prog = {"phase": "start", "msg": "Starting", "frac": 0}
-        fan_curve.set_boost(gpu_tune.GpuTuner.BOOST_PCT, 90)
-        self.fans_ensure()
+        others = fan_curve.other_controllers()
+        if others:
+            self.log("%s controls the GPU fans, so Headroom won't raise them during the test. The temperature limits "
+                     "still stop the test; make sure its curve ramps the fans under load." % ", ".join(others), "warn")
+        else:
+            fan_curve.set_boost(gpu_tune.GpuTuner.BOOST_PCT, 90)
+            self.fans_ensure()
         self.tuner = gpu_tune.GpuTuner(self.nv, self.tele, self.state, self.log, self.gpu_prof, on_progress=prog, quick=quick, mode=mode)
         self.tuner.start()
 
@@ -291,6 +298,10 @@ class Controller:
 
     def fans_set(self, body):
         self.need()
+        others = fan_curve.other_controllers()
+        if body.get("enabled") and others:
+            raise RuntimeError("%s is controlling the fans. Two fan controllers fight each other: close it or turn off its GPU "
+                               "fan control, then turn Headroom's curve on." % ", ".join(others))
         c = fan_curve.save_config(body)
         if c["enabled"]:
             self.fans_ensure()
@@ -377,10 +388,11 @@ class Controller:
         self._bg("Installing CoreCycler", lambda: cpu_tune.install_corecycler(self.log))
 
     def bench(self, rows):
+        """[name, stock score, tuned score] rows typed in the UI; stored as plain values only."""
         clean = []
         for r in (rows if isinstance(rows, list) else [])[:50]:
             try:
-                clean.append([str(r[0])[:80], float(r[1]), float(r[2])])
+                clean.append([str(r[0])[:60], float(r[1]), float(r[2])])
             except (TypeError, ValueError, IndexError):
                 continue
         self.state.set("bench", value=clean)
@@ -398,6 +410,7 @@ class Controller:
 class Handler(BaseHTTPRequestHandler):
     ctl = None
     server_ref = None
+    token = TOKEN
     server_version = "Headroom"
     sys_version = ""
 
@@ -412,47 +425,41 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        for k, v in (extra or {}).items():
-            self.send_header(k, v)
+        if ctype.startswith("text/html"):
+            self.send_header("Content-Security-Policy", CSP)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def _allowed(self, api):
-        """Host check defeats DNS rebinding; Origin check and the token defeat
-        cross-site requests from any page open in a browser."""
-        if self.headers.get("Host", "") not in HOSTS:
-            self._send(403, {"error": "forbidden host"})
-            return False
+    def _host_ok(self):
+        """DNS rebinding: a hostile name that resolves to 127.0.0.1 still sends its own Host.
+        A browser request from another site carries its Origin: refused too."""
         origin = self.headers.get("Origin")
-        if origin is not None and origin != ORIGIN:
-            self._send(403, {"error": "forbidden origin"})
-            return False
-        if api and not hmac.compare_digest(self.headers.get("X-Headroom-Token", ""), TOKEN):
-            self._send(403, {"error": "not authorised"})
-            return False
-        return True
+        return (self.headers.get("Host") or "").lower() in ALLOWED_HOSTS and (origin is None or origin == ORIGIN)
+
+    def _authed(self):
+        return hmac.compare_digest((self.headers.get("X-Headroom-Token") or "").encode(), self.token.encode())
 
     def do_GET(self):
+        if not self._host_ok():
+            return self._send(403, {"error": "bad host"})
         path, _, q = self.path.partition("?")
-        if path == "/api/ping":   # unauthenticated liveness check for Headroom.exe: no data
-            if self._allowed(False):
-                self._send(200, {"ok": True, "pid": os.getpid()})
-            return
-        if not self._allowed(path.startswith("/api/")):
-            return
-        if path == "/api/status":
-            try:
-                since = int(dict(x.split("=", 1) for x in q.split("&") if "=" in x).get("since", 0) or 0)
-            except ValueError:
-                since = 0
-            return self._send(200, self.ctl.status(since))
-        if path == "/api/profiles":
-            return self._send(200, self.ctl.profiles)
-        if path == "/api/setup":
-            return self._send(200, self.ctl.setup.status())
+        if path == "/api/ping":   # liveness for Headroom.exe (its pid tells it whether it's the backend it started)
+            return self._send(200, {"ok": True, "pid": os.getpid()})
         if path.startswith("/api/"):
-            return self._send(404, {"error": "unknown"})
+            if not self._authed():
+                return self._send(403, {"error": "forbidden"})
+            if path == "/api/status":
+                try:
+                    since = int(dict(x.split("=", 1) for x in q.split("&") if "=" in x).get("since", 0) or 0)
+                except ValueError:
+                    since = 0
+                return self._send(200, self.ctl.status(since))
+            if path == "/api/profiles":
+                return self._send(200, self.ctl.profiles)
+            if path == "/api/setup":
+                return self._send(200, self.ctl.setup.status())
+            return self._send(404, {"error": "not found"})
         if path in ("/", "/index.html"):
             path = "/index.html"
         f = os.path.normpath(os.path.join(WEB, path.lstrip("/")))
@@ -474,56 +481,35 @@ class Handler(BaseHTTPRequestHandler):
                 "base-uri 'none'; form-action 'none'; frame-ancestors 'none'" % nonce)
         self._send(200, data, ctype + ("; charset=utf-8" if ctype.startswith("text") else ""), extra)
 
-    def do_POST(self):
-        if not self._allowed(True):
-            return
+    def _body(self):
+        """JSON only: a cross-site 'simple' request (text/plain, form) is refused outright."""
+        if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
+            raise ValueError("Content-Type must be application/json")
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = -1
         if n < 0 or n > MAX_BODY:
-            return self._send(413, {"error": "request too large"})
-        try:
-            body = json.loads(self.rfile.read(n) or b"{}")
-        except ValueError:
-            body = {}
+            raise ValueError("request too large")
+        body = json.loads(self.rfile.read(n) or b"{}")
         if not isinstance(body, dict):
-            body = {}
-        c = self.ctl
-        routes = {
-            "/api/gpu/auto": lambda: c.gpu_auto(bool(body.get("quick")), str(body.get("mode", "full"))),
-            "/api/gpu/stop": c.gpu_stop,
-            "/api/gpu/apply": lambda: c.gpu_apply(_int(body.get("core")), _int(body.get("mem"))),
-            "/api/gpu/apply_saved": c.gpu_apply_saved,
-            "/api/gpu/save_profile": lambda: c.gpu_save_profile(_int(body.get("core")), _int(body.get("mem"))),
-            "/api/gpu/stock": c.gpu_stock,
-            "/api/gpu/efficiency": lambda: c.gpu_eff(bool(body.get("on"))),
-            "/api/gpu/logon": lambda: c.gpu_set_logon(bool(body.get("on"))),
-            "/api/fans/set": lambda: c.fans_set(body),
-            "/api/fans/default": lambda: c.fans_set({"core": fan_curve.DEFAULT["core"], "mem": fan_curve.DEFAULT["mem"]}),
-            "/api/fans/logon": lambda: c.fans_set_logon(bool(body.get("on"))),
-            "/api/reset_all": c.reset_all,
-            "/api/setup/scan": lambda: c.setup.run_scan(True),
-            "/api/setup/rebuild": c.setup.rebuild,
-            "/api/setup/research": c.setup.run_research,
-            "/api/setup/key": lambda: c.setup.set_key(str(body.get("key") or "")),
-            "/api/setup/cooling": lambda: c.setup.set_cooling(body),
-            "/api/setup/lhm": c.setup.install_lhm,
-            "/api/cpu/preflight": c.cpu_preflight,
-            "/api/cpu/action": lambda: c.cpu_action(body),
-            "/api/cpu/start_search": lambda: c.cpu_start_search(_int(body.get("start"), -25)),
-            "/api/cpu/install": c.cpu_install,
-            "/api/cpu/reset": c.cpu.reset,
-            "/api/bench": lambda: c.bench(body.get("rows")),
-            "/api/openfolder": lambda: os.startfile(DATA_DIR),
-            "/api/can_close": lambda: {"ok": c.shutdown_ok(), "cpu_watch": bool(c.cpu.watch and c.cpu.watch.is_alive())},
-        }
+            raise ValueError("JSON object expected")
+        return body
+
+    def do_POST(self):
+        if not self._host_ok():
+            return self._send(403, {"error": "bad host"})
+        if not self._authed():
+            return self._send(403, {"error": "forbidden"})
+        try:
+            body = self._body()
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
         if self.path == "/api/shutdown":
             self._send(200, {"ok": True})
-            c.shutdown()
-            threading.Thread(target=self.server_ref.shutdown, daemon=True).start()
+            stop_server(self.ctl, self.server_ref)
             return
-        fn = routes.get(self.path)
+        fn = routes(self.ctl, body).get(self.path)
         if not fn:
             return self._send(404, {"error": "unknown"})
         try:
@@ -538,6 +524,67 @@ def _int(v, default=0):
         return int(float(v))
     except (TypeError, ValueError):
         return default
+
+
+def routes(c, body):
+    return {
+        "/api/gpu/auto": lambda: c.gpu_auto(bool(body.get("quick")), str(body.get("mode", "full"))),
+        "/api/gpu/stop": c.gpu_stop,
+        "/api/gpu/apply": lambda: c.gpu_apply(_int(body.get("core")), _int(body.get("mem"))),
+        "/api/gpu/apply_saved": c.gpu_apply_saved,
+        "/api/gpu/save_profile": lambda: c.gpu_save_profile(_int(body.get("core")), _int(body.get("mem"))),
+        "/api/gpu/stock": c.gpu_stock,
+        "/api/gpu/efficiency": lambda: c.gpu_eff(bool(body.get("on"))),
+        "/api/gpu/logon": lambda: c.gpu_set_logon(bool(body.get("on"))),
+        "/api/fans/set": lambda: c.fans_set(body),
+        "/api/fans/default": lambda: c.fans_set({"core": fan_curve.DEFAULT["core"], "mem": fan_curve.DEFAULT["mem"]}),
+        "/api/fans/logon": lambda: c.fans_set_logon(bool(body.get("on"))),
+        "/api/reset_all": c.reset_all,
+        "/api/setup/scan": lambda: c.setup.run_scan(True),
+        "/api/setup/rebuild": c.setup.rebuild,
+        "/api/setup/research": c.setup.run_research,
+        "/api/setup/key": lambda: c.setup.set_key(str(body.get("key") or "")),
+        "/api/setup/cooling": lambda: c.setup.set_cooling(body),
+        "/api/setup/lhm": c.setup.install_lhm,
+        "/api/cpu/preflight": c.cpu_preflight,
+        "/api/cpu/action": lambda: c.cpu_action(body),
+        "/api/cpu/start_search": lambda: c.cpu_start_search(_int(body.get("start"), -25)),
+        "/api/cpu/install": c.cpu_install,
+        "/api/cpu/reset": c.cpu.reset,
+        "/api/bench": lambda: c.bench(body.get("rows", [])),
+        "/api/openfolder": lambda: os.startfile(DATA_DIR),
+        "/api/can_close": lambda: {"ok": c.shutdown_ok(), "cpu_watch": bool(c.cpu.watch and c.cpu.watch.is_alive())},
+    }
+
+
+_stopping = threading.Lock()
+
+
+def stop_server(ctl, srv):
+    if not _stopping.acquire(blocking=False):
+        return
+    ctl.shutdown()
+    threading.Thread(target=srv.shutdown, daemon=True).start()
+
+
+def watch_shutdown_event(ctl, srv):
+    """The installer/uninstaller can't know the token. It signals this named event
+    instead; objects made by an elevated process can't be opened for signalling by
+    non-elevated ones (integrity level), so this isn't a way around the token."""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+    except (ImportError, AttributeError):
+        return
+    k32.CreateEventW.restype = ctypes.c_void_p
+    h = k32.CreateEventW(None, True, False, "Local\\Headroom.Shutdown")
+    if not h:
+        return
+
+    def loop():
+        k32.WaitForSingleObject(ctypes.c_void_p(h), 0xFFFFFFFF)
+        stop_server(ctl, srv)
+    threading.Thread(target=loop, daemon=True).start()
 
 
 class Exclusive(ThreadingHTTPServer):
@@ -556,5 +603,6 @@ def main():
     srv = Exclusive(("127.0.0.1", PORT), Handler)  # bind first: a second copy fails here, before touching hardware
     Handler.ctl = Controller()
     Handler.server_ref = srv
+    watch_shutdown_event(Handler.ctl, srv)
     srv.serve_forever()
 

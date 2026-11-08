@@ -320,13 +320,13 @@ function renderCpu(){
   $("cBody").innerHTML=h;
   $("cAct").innerHTML=`<i class="ic">${btn[0]}</i>${btn.slice(2)}`; $("cAct").disabled=!!C.busy;
   $("cInstall").style.display=C.corecycler?"none":""; $("cInstall").disabled=!!C.busy;
-  const e=C.expected||{}, P=S.profile||{}, ct=P.cpu_typical||{}, bo=ct.boost_override_mhz||0, pr=predictCpu(bo,+$("cStart").value), co=ct.co_per_core;
+  const e=C.expected||{}, P=S.profile||{}, ct=P.cpu_typical||{}, bo=ct.boost_override_mhz||0, coStart=Math.max(-50,Math.min(0,parseInt($("cStart").value,10)||0)), pr=predictCpu(bo,coStart), co=ct.co_per_core;
   $("cExp").innerHTML=`<div class="sec"><span class="label"><i class="ic">&#xE9D2;</i>What to expect · ${esc(P.cpu_label||S.hw.cpu)}</span></div>
     ${P.cpu_advisory?`<div class="hint ${esc(P.cpu_advisory.level)}" style="font-size:13px">${esc(P.cpu_advisory.text)}</div>`:""}
     <p class="txt">${esc(P.cpu_method||"")}${co&&co[1]?` Typical chips run Curve Optimizer at ${co[0]} to ${co[1]} per core.`:""}</p>
     <div class="ml"><span>Single-thread</span><b>+${(e.single_thread||[0,0]).join("–")}%</b><span>Multi-thread</span><b>+${(e.multi_thread||[0,0]).join("–")}%</b>
       <span>CPU-bound games</span><b>+${(e.games_cpu_bound||[0,0]).join("–")}%</b><span>1440p / 4K games</span><b>+${(e.games_gpu_bound||[0,1]).join("–")}%</b></div>
-    <div class="upc" style="margin-top:14px"><div class="label">Headroom's prediction · ${bo?"+"+bo+" / ":""}CO ${$("cStart").value}</div><div class="big" style="font-size:26px">${sg(pr.cb)}%</div>
+    <div class="upc" style="margin-top:14px"><div class="label">Headroom's prediction · ${bo?"+"+esc(bo)+" / ":""}CO ${coStart}</div><div class="big" style="font-size:26px">${sg(pr.cb)}%</div>
       <div class="hint" style="margin:0">CPU-bound games · single ${sg(pr.st)}% · multi ${sg(pr.mt)}%</div></div>
     <p class="txt" style="margin-top:14px">The real wins from Curve Optimizer are lower voltage, a cooler CPU and quieter fans, for the same or slightly better speed.</p>
     <p class="hint">Ryzen often freezes instead of rebooting on a bad value. Just press reset: CoreCycler and Headroom pick up again after you log in.</p>`;
@@ -346,7 +346,7 @@ $("cAct").onclick=async()=>{
 };
 async function bios1Next(){
   const r=await api("/api/status?since="+seq), ok=r.cpu.bios1_ok;
-  const msg=ok?`The boost override is active (peak ${fmt(r.cpu.bios1_clock)} MHz).\n\nStart CoreCycler's per-core search from CO ${$("cStart").value}? It runs for hours, so leave the PC alone. If it freezes, press reset.`
+  const msg=ok?`The boost override is active (peak ${fmt(r.cpu.bios1_clock)} MHz).\n\nStart CoreCycler's per-core search from CO ${parseInt($("cStart").value,10)||0}? It runs for hours, so leave the PC alone. If it freezes, press reset.`
             :`The CPU only reached ${fmt(r.cpu.bios1_clock)} MHz, so the BIOS change may not have saved.\n\nStart the CO search anyway?`;
   if(await ask(ok?"Start the CO search":"Boost override not detected",msg,{yes:"Start search"})) act("/api/cpu/start_search",{start:+$("cStart").value},"CoreCycler started");
 }

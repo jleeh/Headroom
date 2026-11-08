@@ -218,12 +218,29 @@ def bios_sheet(board_name, board, cpu, co):
     return "\n".join(rows)
 
 
+WATCH_TASK = "Headroom CPU Watchdog"
+
+
+def set_cpu_watchdog_at_logon(on):
+    """Headless thermal watchdog at logon (no delay): CoreCycler resumes by itself after
+    a crash, so something must watch temperatures even if Headroom's window never opens."""
+    import sys
+    if on:
+        pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "headroom_cpuwatch.pyw")
+        run(["schtasks", "/create", "/f", "/rl", "highest", "/sc", "onlogon", "/tn", WATCH_TASK,
+             "/tr", '"%s" "%s"' % (pyw, script)])
+    else:
+        run(["schtasks", "/delete", "/f", "/tn", WATCH_TASK])
+
+
 def set_resume_at_logon(on, app_cmd):
     if on:
         run(["schtasks", "/create", "/f", "/rl", "highest", "/sc", "onlogon", "/tn", RESUME_TASK,
              "/tr", app_cmd, "/delay", "0000:30"])
     else:
         run(["schtasks", "/delete", "/f", "/tn", RESUME_TASK])
+    set_cpu_watchdog_at_logon(on)
 
 
 def _header_name(text):
@@ -405,6 +422,9 @@ class CpuFlow:
 
     def start_verify(self):
         cc = find_corecycler()
+        if not cc:
+            raise RuntimeError("CoreCycler not installed yet - press 'Install CoreCycler'.")
+        set_cpu_watchdog_at_logon(True)
         write_config(cc, "verify")
         self.state.set("cpu", "verify", value={"since": time.time()})
         launch_corecycler(cc)
@@ -414,7 +434,8 @@ class CpuFlow:
         v = self.state.get("cpu", "verify") or {}
         if self.watch:
             self.watch.stop()
-        res = parse_results(find_corecycler(), v.get("since", time.time()), 0)
+        set_cpu_watchdog_at_logon(False)
+        res = parse_results(find_corecycler() or "", v.get("since", time.time()), 0)
         tuned = cpu_bench.run(self.tele, self.log, progress)
         base = self.state.get("cpu", "baseline") or {}
         up = uplift.cpu(base, tuned)

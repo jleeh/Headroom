@@ -38,3 +38,22 @@ def test_verified_download_ok(tmp_path, monkeypatch):
                                              "sha256": hashlib.sha256(data).hexdigest()})
     path = common.verified_download("t", str(tmp_path), opener=lambda req, timeout: io.BytesIO(data))
     assert open(path, "rb").read() == data
+
+
+def test_load_profiles_reclamps(monkeypatch, tmp_path):
+    import json
+    p = tmp_path / "profile.json"
+    p.write_text(json.dumps({"gpu": {"RTX": {"safety": {"abort_core_c": 120, "max_core_offset": 5000}}},
+                             "cpu": {"Ryzen": {"family": "amd-zen5", "safety": {"abort_tdie_c": 110}}}}))
+    monkeypatch.setattr(common, "PROFILE_FILE", str(p))
+    prof = common.load_profiles()
+    assert prof["gpu"]["RTX"]["safety"]["abort_core_c"] == 85
+    assert prof["gpu"]["RTX"]["safety"]["max_core_offset"] == 500
+    assert prof["cpu"]["Ryzen"]["safety"]["abort_tdie_c"] == 90
+
+
+def test_clamp_offsets():
+    from headroom.gpu_tune import clamp_offsets
+    assert clamp_offsets(9999, 99999, 0.5) == (500, 6000)
+    assert clamp_offsets(-50, -1, 1.0) == (0, 0)
+    assert clamp_offsets(100, 400, None) == (100, 400)

@@ -21,6 +21,7 @@ from . import fan_curve, uplift
 from .common import is_admin, process_running, tdr_events_since
 from .cuda_stress import Cuda, CudaError, CoreTest, MemTest
 from .nvml import CLK_GRAPHICS, CLK_MEM, NvmlError
+from .profiles import CAP
 
 
 class Abort(Exception):
@@ -41,8 +42,11 @@ class GpuTuner(threading.Thread):
         sf = self.prof.get("safety", {})
         self.lim_core = sf.get("abort_core_c", 83)
         self.lim_mem = sf.get("abort_mem_junction_c", 96)
-        self.max_core = sf.get("max_core_offset", 500)
-        self.max_mem_rep = sf.get("max_mem_offset_reported_mhz", 3000)
+        # re-clamped here too: profile.json lives in a user-writable folder
+        self.lim_core = min(self.lim_core, CAP["gpu_abort_core_c"][1])
+        self.lim_mem = min(self.lim_mem, CAP["gpu_abort_mem_c"][1])
+        self.max_core = max(0, min(sf.get("max_core_offset", 150), CAP["gpu_max_core"]))
+        self.max_mem_rep = max(0, min(sf.get("max_mem_offset_reported_mhz", 500), CAP["gpu_max_mem_ab"]))
         self.on_progress = on_progress or (lambda *a: None)
         self.stop_ev = threading.Event()
         self.cu = None
@@ -368,12 +372,13 @@ class GpuTuner(threading.Thread):
 
     def soak(self, core, mem):
         self._set(core=core, mem=mem)
-        self._mark(in_progress=True, phase="soak", testing=["core", core])
         t_end = time.time() + self.SOAK_SECONDS
         n = 0
         while time.time() < t_end:
             self._progress("soak", "Combined soak, %ds left" % (t_end - time.time()),
                            1 - (t_end - time.time()) / self.SOAK_SECONDS)
+            # blame the part under test: a freeze during a VRAM run must not mark the core offset unstable
+            self._mark(in_progress=True, phase="soak", testing=["core", core] if n % 2 == 0 else ["mem", mem])
             try:
                 r = self._core_run(30) if n % 2 == 0 else self._mem_run(30)
             except Abort as e:
@@ -413,6 +418,8 @@ class GpuTuner(threading.Thread):
         threading.Thread(target=self._boost_loop, daemon=True).start()
         try:
             self.preflight()
+            if self.mode == "verify":
+                return self.verify()
             self._mark(in_progress=True, started=time.strftime("%Y-%m-%d %H:%M"))
             base = self.baseline()
             if self.mode == "refine":
@@ -439,8 +446,9 @@ class GpuTuner(threading.Thread):
             up = uplift.gpu(base, tuned)
             self.result = {"core": core, "mem": mem, "mem_ratio": ratio,
                            "mem_afterburner": int(mem * ratio), "tuned": tuned, "uplift": up,
-                           "when": time.strftime("%Y-%m-%d %H:%M")}
+                           "when": time.strftime("%Y-%m-%d %H:%M"), **self._versions()}
             self.state.set("gpu", "result", value=self.result)
+            self._fresh_result()
             self._mark(in_progress=False, testing=None, crashed=[])
             self.state.set("gpu", "applied", value={"core": core, "mem": mem})
             m = up["measured"]
@@ -465,20 +473,74 @@ class GpuTuner(threading.Thread):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _versions(self):
+        """Driver and VBIOS the result was proven on: a change means re-check before applying."""
+        out = {}
+        for k in ("driver", "vbios"):
+            try:
+                out[k] = getattr(self.nv, k)()
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
+    def _fresh_result(self):
+        for k in ("recheck", "stability_reverted", "idle_ref"):
+            self.state.set("gpu", k, value=None)
+
+    def verify(self):
+        """Quick re-check of the saved result (after a driver update, a hot summer, or
+        a crash back-off): stock golden run, then the combined soak at the saved
+        offsets, backing off on failure. Much shorter than a full search."""
+        res = dict(self.state.get("gpu", "result") or {})
+        if not res:
+            raise Abort("Nothing to re-check: run Auto OC first")
+        self._mark(in_progress=True, started=time.strftime("%Y-%m-%d %H:%M"))
+        self.baseline()
+        core, mem, ratio = res["core"], res["mem"], res.get("mem_ratio") or 0.5
+        self._progress("soak", "Re-checking the saved result: core %+d / memory AB %+d" % (core, mem * ratio))
+        ok, why = self.soak(core, mem)
+        tries = 0
+        while not ok and tries < 3:
+            tries += 1
+            core, mem = max(0, core - 15), max(0, mem - int(250 / ratio))
+            self._progress("soak", "Re-check failed (%s): backing off to core %+d / mem %+d" % (why, core, mem))
+            self._recover()
+            ok, why = self.soak(core, mem)
+        if not ok:
+            raise Abort("The saved result is no longer stable; left at stock. Run Auto OC again.")
+        res.update(core=core, mem=mem, mem_afterburner=int(mem * ratio), verified=time.strftime("%Y-%m-%d %H:%M"),
+                   **self._versions())
+        self.state.set("gpu", "result", value=res)
+        self._fresh_result()
+        self._mark(in_progress=False, testing=None, crashed=[])
+        self.state.set("gpu", "applied", value={"core": core, "mem": mem})
+        self._progress("done", "Re-check passed: core %+d / memory AB %+d%s" % (
+            core, mem * ratio, "" if tries == 0 else " (backed off %d step%s)" % (tries, "s" if tries > 1 else "")), 1.0)
+
     def _safe_exit(self):
         self._stock()
         self.state.set("gpu", "applied", value=None)
         self._mark(in_progress=False, testing=None)
 
 
+def clamp_offsets(core, mem, ratio):
+    """Hard caps for anything about to be written to the card (state.json and
+    API input are not trusted): core 0..CAP MHz, memory 0..CAP Afterburner units."""
+    ratio = ratio if isinstance(ratio, (int, float)) and ratio > 0 else 0.5
+    core = max(0, min(int(core or 0), CAP["gpu_max_core"]))
+    mem = max(0, min(int(mem or 0), int(CAP["gpu_max_mem_ab"] / ratio)))
+    return core, mem
+
+
 def apply_saved(nv, state, log):
     r = state.get("gpu", "result")
     if not r:
         return False
-    nv.set_offset(CLK_GRAPHICS, r["core"])
-    nv.set_offset(CLK_MEM, r["mem"])
-    state.set("gpu", "applied", value={"core": r["core"], "mem": r["mem"]})
-    log("Applied saved GPU profile: core %+d, mem %+d" % (r["core"], r["mem"]))
+    core, mem = clamp_offsets(r.get("core"), r.get("mem"), r.get("mem_ratio"))
+    nv.set_offset(CLK_GRAPHICS, core)
+    nv.set_offset(CLK_MEM, mem)
+    state.set("gpu", "applied", value={"core": core, "mem": mem})
+    log("Applied saved GPU profile: core %+d, mem %+d" % (core, mem))
     return True
 
 
@@ -494,7 +556,7 @@ def efficiency_mode(nv, state, log, on):
     b = state.get("gpu", "baseline") or {}
     r = state.get("gpu", "result") or {}
     cap = int(b.get("eff_clk") or 2800)
-    nv.set_offset(CLK_GRAPHICS, r.get("core", 0))
+    nv.set_offset(CLK_GRAPHICS, clamp_offsets(r.get("core", 0), 0, 1)[0])
     nv.lock_gpu_clocks(210, cap)
     state.set("gpu", "efficiency", value={"cap": cap})
     log("Efficiency mode: clock capped at %d MHz with core offset %+d" % (cap, r.get("core", 0)))

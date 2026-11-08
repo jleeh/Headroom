@@ -207,6 +207,8 @@ class Controller:
 
     def gpu_auto(self, quick, mode="full"):
         self.need()
+        if mode not in ("full", "refine", "verify"):
+            raise RuntimeError("unknown mode")
         if self.tuner and self.tuner.is_alive():
             return
 
@@ -228,11 +230,16 @@ class Controller:
             self.tuner.stop()
 
     def gpu_apply(self, core, mem_ab):
+        """Manual offsets, limited to this card's profile caps (never above the hard caps)."""
         self.need()
         r = self.mem_ratio()
-        self.nv.set_offset(CLK_GRAPHICS, int(core))
-        self.nv.set_offset(CLK_MEM, int(mem_ab / r))
-        self.state.set("gpu", "applied", value={"core": int(core), "mem": int(mem_ab / r), "manual": True})
+        sf = (self.gpu_prof or {}).get("safety", {})
+        core = max(0, min(int(core), int(sf.get("max_core_offset", 150))))
+        mem_ab = max(0, min(int(mem_ab), int(sf.get("max_mem_offset_reported_mhz", 500))))
+        core, mem = gpu_tune.clamp_offsets(core, mem_ab / r, r)
+        self.nv.set_offset(CLK_GRAPHICS, core)
+        self.nv.set_offset(CLK_MEM, mem)
+        self.state.set("gpu", "applied", value={"core": core, "mem": mem, "manual": True})
         self.log("Manual GPU offsets applied: core %+d, memory %+d (Afterburner units)" % (core, mem_ab))
 
     def gpu_save_profile(self, core, mem_ab):
@@ -529,6 +536,7 @@ def _int(v, default=0):
 def routes(c, body):
     return {
         "/api/gpu/auto": lambda: c.gpu_auto(bool(body.get("quick")), str(body.get("mode", "full"))),
+        "/api/gpu/recheck": lambda: c.gpu_auto(True, "verify"),
         "/api/gpu/stop": c.gpu_stop,
         "/api/gpu/apply": lambda: c.gpu_apply(_int(body.get("core")), _int(body.get("mem"))),
         "/api/gpu/apply_saved": c.gpu_apply_saved,

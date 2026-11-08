@@ -2,12 +2,65 @@
 plus NVML for the GPU. LHM must be running with its web server on :8085
 (it already autostarts elevated on this PC)."""
 import json
+import os
 import re
+import sys
 import threading
 import time
 import urllib.request
 
 LHM_URL = "http://127.0.0.1:8085/data.json"
+LHM_PORT = 8085
+OWNER_RECHECK_SEC = 30
+
+
+def listening_pid(netstat_out, port=LHM_PORT):
+    """PID listening on 127.0.0.1:<port> (or 0.0.0.0) from `netstat -ano -p TCP`."""
+    for ln in (netstat_out or "").splitlines():
+        f = ln.split()
+        if len(f) >= 5 and f[0].upper() == "TCP" and f[3].upper() == "LISTENING" and \
+                f[1] in ("127.0.0.1:%d" % port, "0.0.0.0:%d" % port):
+            try:
+                return int(f[4])
+            except ValueError:
+                return None
+    return None
+
+
+def _proc_info(pid):
+    """(image path, elevated) for a PID, via the Win32 API. (None, False) if unknown."""
+    import ctypes
+    import ctypes.wintypes as W
+    k32, adv = ctypes.windll.kernel32, ctypes.windll.advapi32
+    k32.OpenProcess.restype = W.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid)            # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None, False
+    try:
+        buf, n = ctypes.create_unicode_buffer(1024), W.DWORD(1024)
+        path = buf.value if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) else None
+        tok, elev, ret = W.HANDLE(), W.DWORD(0), W.DWORD(0)
+        elevated = False
+        if adv.OpenProcessToken(h, 0x0008, ctypes.byref(tok)):   # TOKEN_QUERY
+            if adv.GetTokenInformation(tok, 20, ctypes.byref(elev), 4, ctypes.byref(ret)):   # TokenElevation
+                elevated = bool(elev.value)
+            k32.CloseHandle(tok)
+        return path, elevated
+    finally:
+        k32.CloseHandle(h)
+
+
+def owner_verdict(path, elevated):
+    """The safety watchdogs act on these temperatures, so only an elevated
+    LibreHardwareMonitor counts: an unprivileged program that grabbed port 8085
+    could otherwise feed fake 'cool' readings."""
+    if not path:
+        return "port %d: owner unknown" % LHM_PORT
+    if os.path.basename(path.replace("\\", "/")).lower() != "librehardwaremonitor.exe":
+        return "port %d is used by %s, not LibreHardwareMonitor" % (LHM_PORT, os.path.basename(path))
+    if not elevated:
+        return "LibreHardwareMonitor on port %d isn't running as administrator" % LHM_PORT
+    return None
 
 
 def _num(v):
@@ -25,18 +78,43 @@ def _num(v):
 class Lhm:
     """Flattens data.json into {SensorId: (type, text, value, hardware)}."""
 
-    def __init__(self, url=LHM_URL):
+    def __init__(self, url=LHM_URL, verify_owner=None):
         self.url = url
         self.ok = False
         self.err = ""
         self.s = {}
+        self.verify_owner = (sys.platform == "win32") if verify_owner is None else verify_owner
+        self._owner = (None, 0, None)      # (pid, checked_at, problem)
+
+    def owner_problem(self):
+        if not self.verify_owner:
+            return None
+        from .common import run
+        cpid, at, prob = self._owner
+        if cpid is not None and time.time() - at < OWNER_RECHECK_SEC:
+            return prob      # netstat is too slow to run every second; the owner rarely changes
+        pid = listening_pid(run(["netstat", "-ano", "-p", "TCP"], 10))
+        if pid is None:
+            self._owner = (None, 0, None)
+            return None    # nothing listening: the request fails on its own
+        try:
+            prob = owner_verdict(*_proc_info(pid))
+        except Exception as e:  # noqa: BLE001
+            prob = "port %d: couldn't check its owner (%s)" % (LHM_PORT, e)
+        self._owner = (pid, time.time(), prob)
+        return prob
 
     def poll(self):
+        prob = self.owner_problem()
+        if prob:
+            self.ok, self.err = False, prob
+            return False
         try:
             with urllib.request.urlopen(self.url, timeout=2) as r:
                 d = json.loads(r.read().decode("utf-8-sig"))
         except Exception as e:  # noqa: BLE001
             self.ok, self.err = False, str(e)
+            self._owner = (None, 0, None)   # whoever answers next gets checked again
             return False
         out = {}
 

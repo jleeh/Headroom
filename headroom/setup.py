@@ -1,21 +1,38 @@
 """First-run setup: hardware scan -> profile (built-in / family, or Claude research)
 -> sensor app check -> cooling headers. Re-runnable from the Setup tab."""
-import json
 import os
 import shutil
 import subprocess
 import threading
 import time
-import urllib.request
 import zipfile
 
 from . import profiles, research, scan as hwscan
-from .common import PROFILE_FILE, SCAN_FILE, TOOLS_DIR, read_json, run, write_json
+from .common import LEGACY_TOOLS_DIR, PINNED, PROFILE_FILE, SCAN_FILE, TOOLS_DIR, read_json, run, verified_download, write_json
 from .sensors import Lhm
 
-LHM_API = "https://api.github.com/repos/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest"
 LHM_TASK = "Headroom Sensors"
-UA = {"User-Agent": "Headroom-setup", "Accept": "application/vnd.github+json"}
+
+
+def task_command(name):
+    """The program a scheduled task runs ('' if the task doesn't exist)."""
+    import re
+    out = run(["schtasks", "/query", "/tn", name, "/xml"])
+    m = re.search(r"<Command>(.*?)</Command>", out or "", re.S)
+    return (m.group(1).strip().strip('"') if m else "")
+
+
+def remove_legacy_tasks(log):
+    """Headroom 1.0.0 ran LibreHardwareMonitor from %LOCALAPPDATA% (user-writable)
+    through an elevated logon task: any program could swap the exe and get admin
+    rights. Remove such a task; Setup reinstalls the sensors into the tools folder."""
+    cmd = task_command(LHM_TASK)
+    if cmd and os.path.normcase(os.path.abspath(cmd)).startswith(os.path.normcase(os.path.abspath(LEGACY_TOOLS_DIR))):
+        run(["schtasks", "/delete", "/f", "/tn", LHM_TASK])
+        log("Removed the old 'Headroom Sensors' logon task (it ran from a user-writable folder). "
+            "Press 'Install sensors' in Setup to set it up again safely.", "warn")
+        return True
+    return False
 
 LHM_CONFIG = """<?xml version="1.0" encoding="utf-8"?>
 <configuration>
@@ -157,21 +174,14 @@ class Setup:
             exe = self._lhm_exe()
             if not exe:
                 self.progress = "Downloading LibreHardwareMonitor"
-                with urllib.request.urlopen(urllib.request.Request(LHM_API, headers=UA), timeout=30) as r:
-                    rel = json.loads(r.read().decode())
-                assets = [a for a in rel.get("assets", []) if a["name"].lower().endswith(".zip")]
-                assets.sort(key=lambda a: ("net4" in a["name"].lower(), len(a["name"])))   # prefer the main build
-                if not assets:
-                    raise RuntimeError("No download found in the latest LibreHardwareMonitor release")
-                dl = os.path.join(TOOLS_DIR, "_dl")
-                os.makedirs(dl, exist_ok=True)
-                zpath = os.path.join(dl, assets[0]["name"])
-                with urllib.request.urlopen(urllib.request.Request(assets[0]["browser_download_url"], headers=UA), timeout=180) as r, \
-                        open(zpath, "wb") as f:
-                    shutil.copyfileobj(r, f)
+                zpath = verified_download("lhm", os.path.join(TOOLS_DIR, "_dl"), self.log)
                 dest = os.path.join(TOOLS_DIR, "LibreHardwareMonitor")
                 shutil.rmtree(dest, ignore_errors=True)
                 with zipfile.ZipFile(zpath) as z:
+                    for m in z.infolist():   # no absolute paths or '..' (zip slip)
+                        target = os.path.realpath(os.path.join(dest, m.filename))
+                        if not target.startswith(os.path.realpath(dest) + os.sep):
+                            raise RuntimeError("Unsafe path in the LibreHardwareMonitor download: %s" % m.filename)
                     z.extractall(dest)
                 # some releases nest everything in one folder
                 hits = [os.path.join(dp, "LibreHardwareMonitor.exe") for dp, _, fs in os.walk(dest) if "LibreHardwareMonitor.exe" in fs]
@@ -182,7 +192,7 @@ class Setup:
                     for n in os.listdir(inner):
                         shutil.move(os.path.join(inner, n), os.path.join(dest, n))
                 exe = os.path.join(dest, "LibreHardwareMonitor.exe")
-                self.log("LibreHardwareMonitor %s installed to %s" % (rel.get("tag_name", ""), dest))
+                self.log("LibreHardwareMonitor %s installed to %s" % (PINNED["lhm"]["version"], dest))
             cfg = os.path.join(os.path.dirname(exe), "LibreHardwareMonitor.config")
             if not os.path.isfile(cfg):
                 with open(cfg, "w", encoding="utf-8") as f:

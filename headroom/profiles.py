@@ -225,6 +225,6 @@ def clamp_all(prof):
     if isinstance(out.get("gpu"), dict):
         out["gpu"] = {k: clamp_gpu(v) for k, v in out["gpu"].items() if isinstance(v, dict)}
     if isinstance(out.get("cpu"), dict):
-        out["cpu"] = {k: clamp_cpu(v, v.get("vendor") or ("intel" if "intel" in k.lower() else "amd"))
+        out["cpu"] = {k: clamp_cpu(v, v.get("vendor") or ("intel" if "intel" in (k + str(v.get("family") or "")).lower() else "amd"))
                       for k, v in out["cpu"].items() if isinstance(v, dict)}
     return out

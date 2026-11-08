@@ -78,6 +78,31 @@ def _proc_info(pid):
         k32.CloseHandle(h)
 
 
+def httpsys_owners(netsh_out, port=LHM_PORT):
+    """PIDs of the processes behind an HTTP.sys URL registration on <port>, from
+    `netsh http show servicestate view=requestq`. LibreHardwareMonitor's web server
+    runs on HTTP.sys, so the TCP socket itself belongs to PID 4 (System)."""
+    import re
+    pids = []
+    for blk in re.split(r"(?m)^Request queue name:", netsh_out or "")[1:]:
+        if re.search(r"(?i)https?://[^\s/]*:%d/" % port, blk):
+            pids += [int(m) for m in re.findall(r"(?m)^\s+ID:\s*(\d+)", blk)]
+    return pids
+
+
+def lhm_processes(tasklist_out):
+    """PIDs of running LibreHardwareMonitor.exe from `tasklist /fo csv /nh`."""
+    out = []
+    for ln in (tasklist_out or "").splitlines():
+        f = [x.strip('"') for x in ln.split('","')]
+        if len(f) > 1 and f[0].strip('"').lower() == "librehardwaremonitor.exe":
+            try:
+                out.append(int(f[1]))
+            except ValueError:
+                pass
+    return out
+
+
 def owner_verdict(path, elevated):
     """The safety watchdogs act on these temperatures, so only an elevated
     LibreHardwareMonitor counts: an unprivileged program that grabbed port 8085
@@ -128,6 +153,22 @@ class Lhm:
         if pid is None:
             self._owner = (None, 0, None)
             return None    # nothing listening: the request fails on its own
+        if pid == 4:
+            # HTTP.sys (kernel) owns the socket: check the process that registered the URL. If netsh's
+            # (localised) text can't be read, an elevated LibreHardwareMonitor must be running; ordinary
+            # programs can't register an HTTP.sys URL on this port without an admin-made reservation.
+            cands = httpsys_owners(run(["netsh", "http", "show", "servicestate", "view=requestq"], 15)) or \
+                lhm_processes(run(["tasklist", "/fo", "csv", "/nh", "/fi", "imagename eq LibreHardwareMonitor.exe"], 10))
+            probs = []
+            for c in cands:
+                try:
+                    probs.append(owner_verdict(*_proc_info(c)))
+                except Exception as e:  # noqa: BLE001
+                    probs.append("port %d: couldn't check its owner (%s)" % (LHM_PORT, e))
+            prob = None if any(x is None for x in probs) else (probs[0] if probs else
+                                                               "port %d is served by Windows (HTTP.sys) for an unknown program" % LHM_PORT)
+            self._owner = (pid, time.time(), prob)
+            return prob
         try:
             prob = owner_verdict(*_proc_info(pid))
         except Exception as e:  # noqa: BLE001

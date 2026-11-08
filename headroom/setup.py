@@ -211,7 +211,11 @@ class Setup:
                 with open(cfg, "w", encoding="utf-8") as f:
                     f.write(LHM_CONFIG)
             run(["schtasks", "/create", "/f", "/rl", "highest", "/sc", "onlogon", "/tn", LHM_TASK, "/tr", '"%s"' % exe])
-            subprocess.Popen([exe], cwd=os.path.dirname(exe), creationflags=0x00000008 | 0x00000200, close_fds=True)
+            from .sensors import lhm_processes
+            if lhm_processes(run(["tasklist", "/fo", "csv", "/nh", "/fi", "imagename eq LibreHardwareMonitor.exe"], 10)):
+                self.log("LibreHardwareMonitor is already running: waiting for its web server instead of starting another copy")
+            else:
+                subprocess.Popen([exe], cwd=os.path.dirname(exe), creationflags=0x00000008 | 0x00000200, close_fds=True)
             self.progress = "Waiting for the sensor web server"
             for _ in range(40):
                 time.sleep(1)

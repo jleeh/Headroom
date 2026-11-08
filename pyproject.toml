@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+extend-exclude = ["vendor", "runtime", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E731", "B008"]

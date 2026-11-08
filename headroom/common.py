@@ -17,15 +17,63 @@ PROFILE_FILE = os.path.join(DATA_DIR, "profile.json")       # the active profile
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 BUILTIN_DIR = os.path.join(APP_DIR, "profiles", "builtin")    # researched profiles shipped with the app
 FAMILIES_FILE = os.path.join(APP_DIR, "profiles", "families.json")
-# tools (CoreCycler, LibreHardwareMonitor) are downloaded on request, never shipped. They live next to
-# the app (Program Files when installed: admin-only) because they run elevated, some from logon tasks:
-# in a user-writable folder any non-admin program could swap them and gain admin rights.
-TOOLS_DIR = os.path.join(APP_DIR, "tools")
+# Tools (CoreCycler, LibreHardwareMonitor, PresentMon) are downloaded on demand, never shipped.
+# They run elevated, so they live inside the install folder (admin-only ACL set by the
+# installer), never in a user-writable folder such as %LOCALAPPDATA%.
+TOOLS_DIR = os.environ.get("HEADROOM_TOOLS") or os.path.join(APP_DIR, "tools")
+LEGACY_TOOLS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", DATA_DIR), "Headroom", "tools")   # <= 1.0.0, never run from here
+
+# Pinned downloads: exact version + SHA-256 (GitHub release asset digests). Bump deliberately.
+PINNED = {
+    "lhm": {"version": "v0.9.6", "name": "LibreHardwareMonitor.zip", "size": 6632626,
+            "url": "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.6/LibreHardwareMonitor.zip",
+            "sha256": "086d9f1b5a99e643edc2cfaaac16051685b551e4c5ac0b32a57c58c0e529c001"},
+    "corecycler": {"version": "v0.11.0.3", "name": "CoreCycler-v0.11.0.3.7z", "size": 45436459,
+                   "url": "https://github.com/sp00n/CoreCycler/releases/download/v0.11.0.3/CoreCycler-v0.11.0.3.7z",
+                   "sha256": "721ed2948b51a2fc7c60289ecb7cbf62057b22d54c4ba5dc70ac5a107fcc1a63"},
+    "presentmon": {"version": "v2.6.0", "name": "PresentMon-2.6.0-x64.exe", "size": 980320,
+                   "url": "https://github.com/GameTechDev/PresentMon/releases/download/v2.6.0/PresentMon-2.6.0-x64.exe",
+                   "sha256": "b2a706bc6ad475749e3b7e3409263aa1e6906d45bdcf993f6dbc0f660188f1af"},
+}
 VENDOR_DIR = os.path.join(APP_DIR, "vendor")                   # pip packages (anthropic SDK) in dev checkouts
 if os.path.isdir(VENDOR_DIR) and VENDOR_DIR not in sys.path:
     sys.path.append(VENDOR_DIR)
 
 NO_WINDOW = 0x08000000
+
+
+def sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verified_download(key, dest_dir, log=None, opener=None):
+    """Download PINNED[key] into dest_dir and check its SHA-256. Returns the file
+    path. A file that is already there is re-hashed, never trusted by name."""
+    import shutil
+    import urllib.request
+    pin = PINNED[key]
+    os.makedirs(dest_dir, exist_ok=True)
+    dst = os.path.join(dest_dir, pin["name"])
+    if os.path.isfile(dst) and sha256_file(dst) == pin["sha256"]:
+        return dst
+    if log:
+        log("Downloading %s %s (%d MB)" % (pin["name"], pin["version"], pin["size"] >> 20))
+    opener = opener or urllib.request.urlopen
+    req = urllib.request.Request(pin["url"], headers={"User-Agent": "Headroom"})
+    part = dst + ".part"
+    with opener(req, timeout=300) as r, open(part, "wb") as f:
+        shutil.copyfileobj(r, f)
+    got = sha256_file(part)
+    if got != pin["sha256"]:
+        os.remove(part)
+        raise RuntimeError("%s failed its integrity check (SHA-256 %s, expected %s). Not installed." % (pin["name"], got, pin["sha256"]))
+    os.replace(part, dst)
+    return dst
 
 
 def is_admin():

@@ -326,7 +326,9 @@ def test_driver_change_and_clamp(tmp_path):
     assert "driver changed from 500.1 to 581.15" == S.driver_change({"driver": "500.1"}, nv)
     assert "vbios" in S.driver_change({"vbios": "1"}, nv)
     assert S.driver_change({}, nv) is None
-    assert S.clamp_result({"core": 9999, "mem": 99999, "mem_ratio": 0.5}) == (500, 1500)
+    # memory cap is 3000 Afterburner units = 6000 NVML units at ratio 0.5 (NVML = AB / ratio)
+    assert S.clamp_result({"core": 9999, "mem": 99999, "mem_ratio": 0.5}) == (500, 6000)
+    assert S.clamp_result({"core": 165, "mem": 2000, "mem_ratio": 0.5}) == (165, 2000)   # a real +1000 AB result survives
     assert S.clamp_result({"core": -5, "mem": -1}) == (0, 0)
     st = mkstate(tmp_path, core=900)
     S.apply_clamped(nv, st, lambda *a: None)

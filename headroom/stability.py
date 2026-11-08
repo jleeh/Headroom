@@ -498,17 +498,10 @@ RING = 120
 IDLE_WINDOW_S, IDLE_MARGIN_C, MAX_AGE_DAYS = 60, 8, 90
 
 
-def clamp_offsets(core, mem):
-    """The hard caps in profiles.CAP; mem is in NVML units, so the cap is converted by the ratio."""
-    from .profiles import CAP
-    return max(0, min(CAP["gpu_max_core"], int(core))), max(0, int(mem))
-
-
 def clamp_result(r):
-    from .profiles import CAP
-    ratio = r.get("mem_ratio") or 0.5
-    core, mem = clamp_offsets(r.get("core", 0), r.get("mem", 0))
-    return core, min(mem, int(CAP["gpu_max_mem_ab"] * ratio))
+    """Saved offsets limited to the hard caps (one implementation: gpu_tune.clamp_offsets)."""
+    from .gpu_tune import clamp_offsets
+    return clamp_offsets(r.get("core", 0), r.get("mem", 0), r.get("mem_ratio"))
 
 
 def should_recheck(idle_temps, idle_ref, when, now=None, margin=IDLE_MARGIN_C, max_age_days=MAX_AGE_DAYS, min_samples=IDLE_WINDOW_S // 2):

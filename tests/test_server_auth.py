@@ -89,7 +89,8 @@ JSON = {"Content-Type": "application/json"}
 def test_ping_is_open_but_harmless(srv):
     port, _, _ = srv
     st, data, _ = req(port, "GET", "/api/ping")
-    assert st == 200 and json.loads(data) == {"ok": True}
+    d = json.loads(data)
+    assert st == 200 and d["ok"] is True and set(d) == {"ok", "pid"}   # nothing but liveness
 
 
 def test_status_needs_token(srv):
@@ -144,3 +145,9 @@ def test_page_has_no_inline_script():
     import re
     assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html), "inline <script> would be blocked by the CSP"
     assert not re.search(r"\son[a-z]+\s*=\s*\"", html), "inline event handlers would be blocked by the CSP"
+
+
+def test_foreign_origin_refused(srv):
+    port, _, _ = srv
+    st, _, _ = req(port, "POST", "/api/gpu/stock", body="{}", headers={**TOK, **JSON, "Origin": "https://evil.example"})
+    assert st == 403

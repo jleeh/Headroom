@@ -127,7 +127,10 @@ def test_authed_json_post_works(srv):
 def test_body_limits(srv):
     port, _, server = srv
     big = "x" * (server.MAX_BODY + 1)
-    assert req(port, "POST", "/api/bench", body=big, headers={**TOK, **JSON})[0] == 400
+    try:   # refused without reading the body: Windows may reset the connection instead of showing the 400
+        assert req(port, "POST", "/api/bench", body=big, headers={**TOK, **JSON})[0] == 400
+    except ConnectionError:
+        pass
     assert req(port, "POST", "/api/bench", body="[1,2]", headers={**TOK, **JSON})[0] == 400
 
 

@@ -1,5 +1,15 @@
-import json, sys
+"""Headless UI smoke test: every tab rendered against seeded data, no console errors,
+no dialogs (the seed has XSS payloads in research text), expected content present.
+
+    python dev/ui_seed.py <datadir>
+    HEADROOM_DATA=<datadir> HEADROOM_TOKEN=tok123 HEADROOM_PORT=7899 python bin/headroom_server.pyw &
+    uv run --with playwright==1.42.0 python dev/ui_smoke.py <screenshot dir>
+"""
+import json
+import sys
+
 from playwright.sync_api import sync_playwright
+
 out = sys.argv[1]
 errs, dialogs, blocked = [], [], []
 with sync_playwright() as p:

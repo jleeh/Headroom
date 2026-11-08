@@ -12,3 +12,4 @@ ignore = ["E731", "B008", "B905"]
 
 [tool.ruff.lint.per-file-ignores]
 "headroom/scan.py" = ["E501"]   # embedded PowerShell one-liners
+"dev/ui_seed.py" = ["E501"]     # fixture data

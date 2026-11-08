@@ -1,4 +1,10 @@
-import json, os, sys, time
+"""Seed a HEADROOM_DATA folder for dev/ui_smoke.py: a tuned GPU, a re-check, crashes, a game result,
+and research text containing markup/JS (must render inert)."""
+import json
+import os
+import sys
+import time
+
 d = sys.argv[1]
 now = time.time()
 state = {"gpu": {"result": {"core": 165, "mem": 1500, "mem_ratio": 0.5, "mem_afterburner": 750, "when": "2026-11-01 20:10",

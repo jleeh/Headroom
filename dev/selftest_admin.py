@@ -1,41 +1,84 @@
-"""Elevated self-test: small offsets, readback, short stress, back to stock."""
-import os, sys, time, traceback
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-out = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "selftest_result.txt"), "w", buffering=1)
-def p(*a): out.write(" ".join(str(x) for x in a) + "\n")
-from headroom.nvml import Nvml, CLK_GRAPHICS, CLK_MEM
-from headroom.common import is_admin
-from headroom.sensors import Telemetry
-from headroom.cuda_stress import Cuda, CoreTest, MemTest
-nv = Nvml()
-try:
-    p("admin", is_admin())
-    tele = Telemetry(nv); tele.start()
-    cu = Cuda(); ct = CoreTest(cu); ct.calibrate(); ct.golden(); mt = MemTest(cu, fraction=0.5)
-    def loaded(label, secs=8):
-        clk=[]; mem=[]; pw=[]
-        import threading
-        st=threading.Event()
-        def smp():
-            while not st.wait(1):
-                g=tele.get().get("gpu",{})
-                if g.get("util",0)>=90: clk.append(g["clk"]); mem.append(g["mem_clk"]); pw.append(g["power"])
-        th=threading.Thread(target=smp,daemon=True); th.start()
-        r=ct.run(secs); m=mt.run(secs/2)
-        st.set(); th.join()
-        av=lambda l: sum(l)/len(l) if l else 0
-        p(label, "core ok=%s rate=%.3e  clk=%.0f mem=%.0f pw=%.0f  bw=%.1f memok=%s" % (r["ok"], r["rate"], av(clk), av(mem), av(pw), m["gbps"], m["ok"]))
-    loaded("stock")
-    for kind,name in ((CLK_GRAPHICS,"gfx"),(CLK_MEM,"mem")):
-        for ps in (0,2): p("offset before", name, "P%d"%ps, nv.get_offset(kind, ps))
-    nv.set_offset(CLK_GRAPHICS, 50); nv.set_offset(CLK_MEM, 250)
-    for kind,name in ((CLK_GRAPHICS,"gfx"),(CLK_MEM,"mem")):
-        for ps in (0,2): p("offset after", name, "P%d"%ps, nv.get_offset(kind, ps))
-    p("max clocks now", nv.max_clock(0), nv.max_clock(2))
-    loaded("+50/+250")
-except Exception:
-    p(traceback.format_exc())
-finally:
-    p("reset errs", nv.reset_all())
-    p("offsets final", nv.get_offset(CLK_GRAPHICS,0), nv.get_offset(CLK_MEM,0), nv.get_offset(CLK_MEM,2))
-    out.close()
+"""Elevated hardware self-test (run as administrator, NVIDIA GPU required):
+stock load run, small offsets (+50 core / +250 memory) with read-back, a second
+load run, then everything back to stock. Writes dev/selftest_result.txt.
+
+    py -3.12 dev\\selftest_admin.py
+"""
+import os
+import sys
+import threading
+import traceback
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from headroom.common import is_admin  # noqa: E402
+from headroom.cuda_stress import CoreTest, Cuda, MemTest  # noqa: E402
+from headroom.nvml import CLK_GRAPHICS, CLK_MEM, Nvml  # noqa: E402
+from headroom.sensors import Telemetry  # noqa: E402
+
+KINDS = ((CLK_GRAPHICS, "core"), (CLK_MEM, "mem"))
+
+
+def mean(xs):
+    return sum(xs) / len(xs) if xs else 0
+
+
+def loaded_run(label, tele, core, mem, log, secs=8):
+    """One compute + one VRAM run while sampling clocks and power under load."""
+    samples, stop = [], threading.Event()
+
+    def sample():
+        while not stop.wait(1):
+            g = tele.get().get("gpu", {})
+            if g.get("util", 0) >= 90:
+                samples.append(g)
+    th = threading.Thread(target=sample, daemon=True)
+    th.start()
+    r, m = core.run(secs), mem.run(secs / 2)
+    stop.set()
+    th.join()
+    log("%-10s core ok=%s rate=%.3e  clk=%.0f MHz  mem=%.0f MHz  power=%.0f W  bw=%.1f GB/s  vram ok=%s" % (
+        label, r["ok"], r["rate"], mean([s["clk"] for s in samples]), mean([s["mem_clk"] for s in samples]),
+        mean([s["power"] for s in samples]), m["gbps"], m["ok"]))
+
+
+def offsets(nv, log, when):
+    for kind, name in KINDS:
+        for pstate in (0, 2):
+            log("offset %-6s %-4s P%d: %s" % (when, name, pstate, nv.get_offset(kind, pstate)))
+
+
+def main():
+    path = os.path.join(ROOT, "dev", "selftest_result.txt")
+    with open(path, "w", buffering=1, encoding="utf-8") as out:
+        def log(*a):
+            out.write(" ".join(str(x) for x in a) + "\n")
+            print(*a)
+        nv = Nvml()
+        try:
+            log("admin", is_admin())
+            tele = Telemetry(nv)
+            tele.start()
+            cu = Cuda()
+            core = CoreTest(cu)
+            core.calibrate()
+            core.golden()
+            mem = MemTest(cu, fraction=0.5)
+            loaded_run("stock", tele, core, mem, log)
+            offsets(nv, log, "before")
+            nv.set_offset(CLK_GRAPHICS, 50)
+            nv.set_offset(CLK_MEM, 250)
+            offsets(nv, log, "after")
+            log("max clocks now", nv.max_clock(0), nv.max_clock(2))
+            loaded_run("+50/+250", tele, core, mem, log)
+        except Exception:  # noqa: BLE001
+            log(traceback.format_exc())
+        finally:
+            log("reset errors", nv.reset_all())
+            offsets(nv, log, "final")
+    print("written to", path)
+
+
+if __name__ == "__main__":
+    main()

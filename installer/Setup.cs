@@ -83,7 +83,8 @@ static class App
         }
         // ask a running Headroom to shut down cleanly (it puts the fan curve process to rest too). The API needs the
         // launcher's token, so use the backend's named event (only elevated processes can signal it).
-        try { EventWaitHandle h; if (EventWaitHandle.TryOpenExisting(@"Local\Headroom.Shutdown", out h)) using (h) h.Set(); } catch { }
+        // a backend without a window (or one that didn't close): its admin-only named event
+        try { EventWaitHandle ev; if (EventWaitHandle.TryOpenExisting(@"Local\Headroom.Shutdown", out ev)) using (ev) ev.Set(); } catch { }
         Thread.Sleep(1500);
         foreach (var p in Process.GetProcesses())
         {

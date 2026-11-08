@@ -316,6 +316,7 @@ select.fld option{background:var(--bg);color:var(--text)}
         <div class="feed" id="gFeed"></div>
       </div></section>
       <section class="pane"><div class="in">
+        <div id="gRecheck"></div>
         <div class="sec"><span class="label"><i class="ic">&#xE9E9;</i>Manual / saved profile</span></div>
         <div class="slider"><span class="l">Core offset</span><input type="range" id="sCore" min="-300" max="500" step="5" value="0"><output id="oCore">+0</output></div>
         <div class="slider"><span class="l">Memory (AB)</span><input type="range" id="sMem" min="-1000" max="3000" step="50" value="0"><output id="oMem">+0</output></div>
@@ -330,6 +331,17 @@ select.fld option{background:var(--bg);color:var(--text)}
         <label class="sw"><div>Efficiency mode<small>Stock speed at a lower voltage: less power and heat</small></div><input type="checkbox" id="swEff"><span class="t"></span></label>
         <label class="sw"><div>Apply at logon<small>Skipped automatically if the last shutdown was a crash</small></div><input type="checkbox" id="swLogon"><span class="t"></span></label>
         <div class="hint">Memory is in MSI Afterburner units (+1000 = +2 Gbps). Values above the auto result haven't been stability-tested. Offsets reset on reboot unless "Apply at logon" is on.</div>
+        <div class="sec"><span class="label"><i class="ic">&#xE7BA;</i>Crash watch</span><span class="tag" id="gStabTag"></span></div>
+        <label class="sw"><div>Watch for crashes<small>Driver resets, hardware errors and bluescreens are recorded; the overclock backs off on its own and goes back to stock after repeated crashes</small></div><input type="checkbox" id="swCrash"><span class="t"></span></label>
+        <div class="row"><label class="sw" style="flex:1;margin:0"><div>Back off automatically<small>-15 MHz core, then -250 memory, per GPU crash</small></div><input type="checkbox" id="stAuto"><span class="t"></span></label>
+          <label class="hint" style="margin:0">stock after</label><input class="fld" id="stMax" type="number" min="1" max="20" style="width:58px">
+          <label class="hint" style="margin:0">crashes in</label><input class="fld" id="stDays" type="number" min="1" max="90" style="width:58px"><label class="hint" style="margin:0">days</label>
+          <button class="btn q" id="stSave">Save</button><button class="btn q" id="stCheck">Check now</button></div>
+        <div id="gStab"></div>
+        <div class="sec"><span class="label"><i class="ic">&#xE7FC;</i>When to overclock</span></div>
+        <div class="row"><select class="fld" id="gaMode"><option value="always">Always (at logon)</option><option value="games">Only while these games run</option></select>
+          <input class="fld" id="gaGames" placeholder="game.exe, other.exe" style="flex:1;min-width:180px"><button class="btn q" id="gaSave">Save</button></div>
+        <div class="hint">"Only while games run" keeps the desktop at stock and applies the saved offsets when one of these programs starts.</div>
       </div></section>
     </div>
 
@@ -348,13 +360,20 @@ select.fld option{background:var(--bg);color:var(--text)}
         <div class="sec" style="margin-top:0"><span class="label"><i class="ic">&#xE8F1;</i>Profile sources</span></div>
         <div id="suSrc"></div>
         <div class="sec"><span class="label"><i class="ic">&#xE721;</i>Research my hardware with Claude</span></div>
-        <p class="txt">Claude searches reviews and owner results for your exact parts (including your GPU's board partner and your motherboard's BIOS), then Headroom builds a profile from them with the source links. Only model names, versions and limits from the scan are sent. It takes a few minutes and uses your own Anthropic API key, so it's billed to your account; the log shows what it used.</p>
+        <p class="txt">Claude searches reviews and owner results for your exact parts (including your GPU's board partner and your motherboard's BIOS), then Headroom builds a profile from them with the source links. Only model names, versions and limits from the scan are sent. It takes a few minutes and runs on your own Anthropic API key (billed to your account) or your own Claude Code login; the log shows what it used.</p>
+        <div class="row"><label class="hint" style="margin:0">Run with</label><select class="fld" id="suBackend"><option value="api">My Anthropic API key</option><option value="claude_cli">My Claude Code login</option></select>
+          <label class="hint" style="margin:0">monthly cap $</label><input class="fld" id="suCap" type="number" min="0" max="1000" step="1" style="width:70px"><button class="btn q" id="suResSave">Save</button></div>
+        <div class="hint" id="suResInfo"></div>
         <div class="row"><input class="fld" type="password" id="suKey" placeholder="Anthropic API key (sk-ant-…)" autocomplete="off" style="flex:1;min-width:220px">
           <button class="btn" id="suKeySave"><i class="ic">&#xE72E;</i>Save key</button></div>
         <div class="hint" id="suKeyState"></div>
         <div class="row" style="margin-top:10px"><button class="btn pri" id="suResearch"><i class="ic">&#xE721;</i>Research my hardware</button>
-          <button class="btn q" id="suRebuild"><i class="ic">&#xE777;</i>Use built-in data only</button></div>
+          <button class="btn q" id="suRebuild"><i class="ic">&#xE777;</i>Use built-in data only</button>
+          <button class="btn red" id="suCancel" style="display:none">Cancel</button></div>
         <div class="job idle" id="suJob" style="margin-top:12px"><div class="top"><span class="ph" id="suPh">Idle</span></div><div class="msg" id="suMsg"></div></div>
+        <div class="sec"><span class="label"><i class="ic">&#xE895;</i>Updates</span><span class="tag" id="upVer"></span></div>
+        <div class="row"><button class="btn q" id="upCheck">Check for updates</button><button class="btn pri" id="upInstall" style="display:none">Download &amp; install</button></div>
+        <div class="hint" id="upMsg">Updates are only offered when their signature checks out against the key built into Headroom.</div>
         <div class="sec"><span class="label"><i class="ic">&#xE9D9;</i>Sensors</span></div>
         <div id="suLhm"></div>
         <div class="sec"><span class="label"><i class="ic">&#xE9CA;</i>Cooling check for the CPU stress test</span></div>
@@ -417,6 +436,15 @@ select.fld option{background:var(--bg);color:var(--text)}
         <input class="field num" id="bS" placeholder="Stock" style="width:120px"><input class="field num" id="bT" placeholder="Tuned" style="width:120px">
         <button class="btn pri" id="bAdd"><i class="ic">&#xE710;</i>Add</button><button class="btn" id="bClr">Clear</button></div>
       <table style="margin-top:14px"><thead><tr><th>Test</th><th style="text-align:right">Stock</th><th style="text-align:right">Tuned</th><th style="text-align:right">Uplift</th><th></th></tr></thead><tbody id="bRows"></tbody></table>
+      <div class="sec" style="margin-top:22px"><span class="label"><i class="ic">&#xE7FC;</i>Measure a game · stock vs tuned while you play</span></div>
+      <p class="txt">Start the game and play a steady scene. Headroom switches between stock and your saved offsets every few seconds and records real frame rates with PresentMon, so both are measured in the same session.</p>
+      <div class="row"><select class="fld" id="gmProc" style="flex:1;min-width:200px"><option value="">Pick the running game…</option></select>
+        <button class="btn q" id="gmRefresh">Refresh</button>
+        <label class="hint" style="margin:0">seconds</label><input class="fld" id="gmSecs" type="number" min="5" max="120" value="20" style="width:64px">
+        <label class="hint" style="margin:0">rounds</label><input class="fld" id="gmRounds" type="number" min="1" max="6" value="3" style="width:52px">
+        <button class="btn pri" id="gmStart">Measure</button><button class="btn red" id="gmStop">Stop</button></div>
+      <div class="hint" id="gmMsg"></div>
+      <div id="gmRes"></div>
       <div class="hint" style="margin-top:12px">3DMark is installed: Steel Nomad or Time Spy for the GPU, CPU Profile for the CPU. Run each twice and enter the average; differences under about 1% are noise.</div>
     </div></section></div>
 

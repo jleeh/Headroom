@@ -189,8 +189,8 @@ function renderFans(){
   if(!S.caps.gpu_fans&&!renderFans._n){ renderFans._n=1; $("fcNow").insertAdjacentHTML("beforebegin",`<div class="job err" style="margin-bottom:10px"><span class="ph">Fan control isn't available</span><div class="msg">Headroom's fan curve needs an NVIDIA card with controllable fans.</div></div>`); }
   if(!fcDirty||!fc) fc=clone({core:F.config.core,mem:F.config.mem});
   const st=F.status||{}, g=S.sensors.gpu||{}, x=S.sensors.gpu_x||{};
-  const mode=!st.running?"card's own curve":st.why==="tuning boost"?"tuning boost":st.why==="emergency"?"EMERGENCY 100%":st.mode==="manual"?"Headroom curve":"curve: card in control (cool)";
-  $("fcMode").textContent=mode; $("fcMode").className="tag "+(st.why==="emergency"?"bad":"");
+  const mode=!st.running?"card's own curve":st.mode==="yielded"?"paused: "+(st.yielded_to||"another program")+" controls the fans":st.why==="tuning boost"?"tuning boost":st.why==="emergency"?"EMERGENCY 100%":st.mode==="manual"?"Headroom curve":"curve: card in control (cool)";
+  $("fcMode").textContent=mode; $("fcMode").className="tag "+(st.why==="emergency"?"bad":st.mode==="yielded"?"warn":"");
   const [want]=fcWant(g.temp,x.mem_junction), rpm=(x.fans||[]).filter(v=>v!=null);
   $("fcNow").innerHTML=stat("Fan speed",(g.fan??"–")+" %"+(rpm.length?" · "+rpm.map(v=>Math.round(v)).join(" / ")+" rpm":""))+
     stat("GPU core",fmt(g.temp)+" °C",lvl(g.temp,S.limits.gpu_core_warn,S.limits.gpu_core))+
@@ -322,6 +322,7 @@ function renderCpu(){
   $("cInstall").style.display=C.corecycler?"none":""; $("cInstall").disabled=!!C.busy;
   const e=C.expected||{}, P=S.profile||{}, ct=P.cpu_typical||{}, bo=ct.boost_override_mhz||0, pr=predictCpu(bo,+$("cStart").value), co=ct.co_per_core;
   $("cExp").innerHTML=`<div class="sec"><span class="label"><i class="ic">&#xE9D2;</i>What to expect · ${esc(P.cpu_label||S.hw.cpu)}</span></div>
+    ${P.cpu_advisory?`<div class="hint ${esc(P.cpu_advisory.level)}" style="font-size:13px">${esc(P.cpu_advisory.text)}</div>`:""}
     <p class="txt">${esc(P.cpu_method||"")}${co&&co[1]?` Typical chips run Curve Optimizer at ${co[0]} to ${co[1]} per core.`:""}</p>
     <div class="ml"><span>Single-thread</span><b>+${(e.single_thread||[0,0]).join("–")}%</b><span>Multi-thread</span><b>+${(e.multi_thread||[0,0]).join("–")}%</b>
       <span>CPU-bound games</span><b>+${(e.games_cpu_bound||[0,0]).join("–")}%</b><span>1440p / 4K games</span><b>+${(e.games_gpu_bound||[0,1]).join("–")}%</b></div>
@@ -380,10 +381,12 @@ async function renderProfiles(){
   for(const [sec,items] of Object.entries(profiles)){ if(sec.startsWith("_")) continue;
     for(const [name,p] of Object.entries(items)){
       h+=`<div class="prof"><div class="paneh" style="margin:0"><div class="tile"><i class="ic">${H[sec]||""}</i></div><div><h3>${esc(name)}</h3><small>${sec.toUpperCase()}${src[sec]?` · <span class="chip ${src[sec]}">${R[src[sec]]||src[sec]}</span>`:""}</small></div></div><div class="kv">`;
-      for(const [k,v] of Object.entries(p)){ if(["community_results","sources","safety","settings_to_enter","_source","label"].includes(k)||v==null||v==="") continue;
+      for(const [k,v] of Object.entries(p)){ if(["community_results","sources","safety","settings_to_enter","_source","label","rejected","advisory"].includes(k)||v==null||v==="") continue;
         h+=`<span>${k.replace(/_/g," ")}</span><div>${typeof v==="object"?esc(Object.entries(v).map(([a,b])=>a.replace(/_/g," ")+": "+(Array.isArray(b)?b.join(" – "):b)).join(" · ")):esc(String(v))}</div>`; }
       h+=`</div>`;
       if(p.settings_to_enter) h+=`<table style="margin-top:10px"><thead><tr><th>BIOS setting</th><th>Value</th></tr></thead><tbody>${p.settings_to_enter.map(r=>`<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join("")}</tbody></table>`;
+      if(p.rejected&&p.rejected.length) h+=`<div class="label" style="margin-top:12px">Left off the BIOS sheet</div><div class="hint">Research suggested these, but they are outside what Headroom considers safe (voltages, power limits, memory, unknown settings), so they are not shown as instructions.</div><table><tbody>${p.rejected.map(r=>`<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td class="hint">${esc(r[2])}</td></tr>`).join("")}</tbody></table>`;
+      if(p.advisory) h+=`<div class="hint ${esc(p.advisory.level)}" style="margin-top:10px">${esc(p.advisory.text)}</div>`;
       if(p.community_results) h+=`<table style="margin-top:12px"><thead><tr><th>Source</th><th>Settings</th><th>Result</th></tr></thead><tbody>${p.community_results.map(c=>`<tr><td><b>${safeUrl(c.url)?`<a href="${esc(safeUrl(c.url))}" target="_blank" rel="noopener">${esc(c.source)}</a>`:esc(c.source)}</b></td><td>${esc(c.settings)}</td><td>${esc(c.result)}</td></tr>`).join("")}</tbody></table>`;
       if(p.safety){ const sf=p.safety; h+=`<div class="label" style="margin-top:12px">Safety</div><ul>${(sf.notes||[]).map(n=>`<li>${esc(n)}</li>`).join("")}</ul>`; }
       if(p.sources&&p.sources.length) h+=`<div class="label" style="margin-top:12px">Sources</div><ul>${p.sources.filter(safeUrl).map(s=>`<li><a href="${esc(s)}" target="_blank" rel="noopener">${esc(s.replace(/^https?:\/\/(www\.)?/,"").slice(0,90))}</a></li>`).join("")}</ul>`;
@@ -391,11 +394,74 @@ async function renderProfiles(){
   $("profBody").innerHTML=h;
 }
 
+// ---- crash watch, re-check, per-game apply (GPU tab)
+const KIND={gpu_tdr:"GPU driver reset",gpu_app_crash:"Game crash in the NVIDIA driver",whea_corrected:"CPU hardware error (corrected)",
+  whea_fatal:"CPU hardware error",unexpected_shutdown:"Unexpected shutdown",bugcheck:"Bluescreen"};
+let stInit=false, gaInit=false;
+function renderStability(){
+  const T=S.stability||{}, C=T.config||{}, rc=S.recheck, rv=S.reverted;
+  $("swCrash").checked=!!T.tasks_installed;
+  if(!stInit&&T.config){ stInit=true; $("stAuto").checked=!!C.auto_backoff; $("stMax").value=C.max_crashes; $("stDays").value=C.window_days; }
+  const n=Object.values(T.counts||{}).reduce((a,b)=>a+b,0);
+  $("gStabTag").textContent=T.tasks_installed?(n?n+" in "+C.window_days+" days":"watching"):"off"; $("gStabTag").className="tag "+(n?"warn":"");
+  const cores=Object.entries(T.cpu_cores_to_loosen||{});
+  $("gStab").innerHTML=`<div class="hint">${esc(T.status||"")}</div>`+
+    (cores.length?`<div class="hint warn">CPU errors point at core${cores.length>1?"s":""} ${cores.map(([c,k])=>esc(c)+" ("+k+"x)").join(", ")}: raise their Curve Optimizer value by 2 in the BIOS (e.g. -20 → -18).</div>`:"")+
+    ((T.recent||[]).length?`<table style="margin-top:8px"><thead><tr><th>When</th><th>What</th><th>Action</th></tr></thead><tbody>${T.recent.slice(0,6).map(e=>
+      `<tr><td>${esc(new Date(e.t*1000).toLocaleString())}</td><td>${esc(KIND[e.kind]||e.kind)}${e.bugcheck?` <span class="hint">(${esc(e.bugcheck)})</span>`:""}</td><td>${esc(e.action||"")}</td></tr>`).join("")}</tbody></table>`:"");
+  const busy=S.gpu.busy;
+  $("gRecheck").innerHTML=rv?`<div class="job err" style="margin-bottom:12px"><span class="ph">Overclock turned off after repeated crashes</span><div class="msg">${esc(rv.reason||"")} (${esc(rv.when||"")}). Run Auto OC again to find new stable settings.</div></div>`
+    :rc&&rc.due?`<div class="job" style="margin-bottom:12px"><span class="ph">Re-check recommended</span><div class="msg">${esc(rc.reason||"")}</div><div class="row" style="margin-top:8px"><button class="btn pri" id="gRecheckBtn" ${busy?"disabled":""}>Quick re-check (~5 min)</button></div></div>`:"";
+  if($("gRecheckBtn")) $("gRecheckBtn").onclick=()=>act("/api/gpu/recheck",{},"Re-checking the saved result…");
+  const M=(S.games||{}).mode||{};
+  if(!gaInit&&M.mode){ gaInit=true; $("gaMode").value=M.mode; $("gaGames").value=(M.games||[]).join(", "); }
+}
+$("swCrash").onchange=e=>act("/api/stability/watch",{on:e.target.checked},e.target.checked?"Crash watch on":"Crash watch off").catch(()=>e.target.checked=!e.target.checked);
+$("stSave").onclick=()=>act("/api/stability/config",{auto_backoff:$("stAuto").checked,max_crashes:+$("stMax").value,window_days:+$("stDays").value},"Saved");
+$("stCheck").onclick=async()=>{ const r=await act("/api/stability/check",{}); toast(r.new?r.new+" new event(s) recorded":"No new crashes"); };
+$("gaSave").onclick=()=>act("/api/games/apply_mode",{mode:$("gaMode").value,games:$("gaGames").value.split(/[,\s]+/).filter(Boolean)},"Saved");
+
+// ---- game measurement (Benchmarks tab)
+async function gmList(){ try{ const r=await api("/api/games/processes",{}); const cur=$("gmProc").value;
+  $("gmProc").innerHTML=`<option value="">Pick the running game…</option>`+r.processes.map(p=>`<option ${p===cur?"selected":""}>${esc(p)}</option>`).join(""); }catch(e){ toast(e.message); } }
+$("gmRefresh").onclick=gmList;
+$("gmStart").onclick=()=>act("/api/games/measure",{process:$("gmProc").value,seconds:+$("gmSecs").value,rounds:+$("gmRounds").value},"Measuring: keep playing a steady scene");
+$("gmStop").onclick=()=>act("/api/games/stop",{},"Stopping");
+function renderGames(){
+  const G=S.games||{}, pr=G.progress||{};
+  $("gmMsg").textContent=pr.msg||""; $("gmMsg").className="hint"+(pr.error?" bad":"");
+  $("gmStart").disabled=!!pr.busy||!S.gpu.result; $("gmStop").disabled=!pr.busy;
+  const rs=G.results||[];
+  $("gmRes").innerHTML=rs.length?`<table style="margin-top:10px"><thead><tr><th>Game</th><th style="text-align:right">Stock FPS</th><th style="text-align:right">Tuned FPS</th><th style="text-align:right">Avg</th><th style="text-align:right">1% low</th><th>Verdict</th></tr></thead><tbody>${rs.map(r=>
+    `<tr><td>${esc(r.process)}<div class="hint" style="margin:0">${esc(r.when)}</div></td><td class="n">${fmt(r.stock.avg_fps,1)}</td><td class="n">${fmt(r.tuned.avg_fps,1)}</td>
+     <td class="n"><b class="${r.uplift_pct.avg_fps>=0?"good":"bad"}">${sg(r.uplift_pct.avg_fps)}%</b></td><td class="n">${sg(r.uplift_pct.low1)}%</td><td>${esc(r.verdict)}</td></tr>`).join("")}</tbody></table>`:"";
+}
+
+// ---- research settings + updates (Setup tab)
+let resInit=false;
+function renderResearch(){
+  const R=S.research||{}, E=R.estimate||{}, cli=R.cli||{};
+  if(!resInit&&R.research_backend){ resInit=true; $("suBackend").value=R.research_backend; $("suCap").value=R.research_cap_usd_month; }
+  const api_=$("suBackend").value==="api";
+  $("suKey").parentElement.style.display=api_?"":"none"; $("suKeyState").style.display=api_?"":"none";
+  $("suResInfo").textContent=api_?`About $${fmt(E.typical_usd,2)} per run (at most $${fmt(E.max_usd,2)}), billed to your API key. This month: $${fmt(R.research_spend_month_usd,2)}${R.research_cap_usd_month?` of your $${fmt(R.research_cap_usd_month,0)} cap`:""}.`
+    :(cli.installed?"Uses Claude Code at "+(cli.path||"")+". ":"Claude Code isn't installed (claude.ai/code). ")+(cli.note||"");
+  const busy=(S.setup||{}).busy; $("suCancel").style.display=busy&&/Research/i.test(busy)?"":"none";
+  const U=S.update||{}; $("upVer").textContent="v"+(S.version||"?");
+  if(U.error!==undefined||U.latest){ $("upMsg").textContent=U.error?U.error:U.available?`Version ${U.latest} is available. ${U.notes||""}`:`Headroom is up to date (${U.current}).`; }
+  $("upInstall").style.display=U.available?"":"none";
+}
+$("suResSave").onclick=()=>act("/api/research/settings",{backend:$("suBackend").value,cap:+$("suCap").value},"Saved");
+$("suBackend").onchange=renderResearch;
+$("suCancel").onclick=()=>act("/api/setup/research_cancel",{},"Cancelling research…");
+$("upCheck").onclick=()=>act("/api/update/check",{},"");
+$("upInstall").onclick=async()=>{ if(await ask("Install update","Headroom downloads the new installer, checks it against the signed release and starts it. Headroom closes during the install.",{yes:"Install"})) act("/api/update/install",{},"Starting the installer…"); };
+
 // ---- poll
 async function poll(){
   try{
     const r=await api("/api/status?since="+seq); S=r; seq=r.seq; logs=logs.concat(r.logs).slice(-400);
-    rings(); renderDash(); renderGpu(); renderFans(); renderCpu(); renderBench(); renderSetup();
+    rings(); renderDash(); renderGpu(); renderFans(); renderCpu(); renderBench(); renderSetup(); renderStability(); renderGames(); renderResearch();
     feed("lFeed",()=>true); feed("dFeed",()=>true);
     const last=logs.at(-1); $("navInfo").textContent=last?last.t.slice(11):"";
     const ap=S.gpu.applied, pg=$("pGpu");

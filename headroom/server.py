@@ -120,6 +120,7 @@ class Controller:
                 "gpu_results": (gp.get("community_results") or [])[:2],
                 "mem_verdict": (next(iter((self.profiles.get("memory") or {}).values()), {}) or {}).get("verdict"),
                 "cpu_method": cp.get("tuning_method"), "cpu_typical": cp.get("typical") or {},
+                "cpu_advisory": cp.get("advisory"),
                 "cpu_stock_boost": (cp.get("stock") or {}).get("boost_mhz") or (sc.get("cpu") or {}).get("max_mhz") or 5000}
 
     def caps(self):

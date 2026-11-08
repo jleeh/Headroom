@@ -123,37 +123,64 @@ def process_running(*names):
 
 class State:
     """Small JSON store. Written on every change, so a crash or freeze in the
-    middle of a test leaves an accurate record of what was being tested."""
+    middle of a test leaves an accurate record of what was being tested.
+    Several processes share the file (backend, logon apply, crash handler,
+    monitor), so it is re-read whenever it changed on disk: a stale in-memory
+    copy must never overwrite what another process wrote."""
 
     def __init__(self, path=STATE_FILE):
         self.path = path
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.d = {}
+        self._sig = None
+        self._reload(force=True)
+
+    def _stat(self):
         try:
-            with open(path, encoding="utf-8") as f:
-                self.d = json.load(f)
+            st = os.stat(self.path)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _reload(self, force=False):
+        sig = self._stat()
+        if not force and sig == self._sig:
+            return
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                d = json.load(f)
+            self.d = d if isinstance(d, dict) else {}
         except Exception:  # noqa: BLE001
-            self.d = {}
+            if force:
+                self.d = {}
+        self._sig = sig
 
     def get(self, *keys, default=None):
-        d = self.d
-        for k in keys:
-            if not isinstance(d, dict) or k not in d:
-                return default
-            d = d[k]
-        return d
+        with self.lock:
+            self._reload()
+            d = self.d
+            for k in keys:
+                if not isinstance(d, dict) or k not in d:
+                    return default
+                d = d[k]
+            return d
 
     def set(self, *keys, value):
         with self.lock:
+            self._reload()
             d = self.d
             for k in keys[:-1]:
-                d = d.setdefault(k, {})
+                if not isinstance(d.get(k), dict):
+                    d[k] = {}
+                d = d[k]
             d[keys[-1]] = value
-            tmp = self.path + ".tmp"
+            tmp = "%s.%d.tmp" % (self.path, os.getpid())
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.d, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.path)
+            self._sig = self._stat()
 
 
 class Log:
@@ -184,7 +211,7 @@ def read_json(path, default=None):
 
 
 def write_json(path, data):
-    tmp = path + ".tmp"
+    tmp = "%s.%d.tmp" % (path, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)

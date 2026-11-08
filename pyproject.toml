@@ -2,10 +2,13 @@
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 140
+line-length = 150
 target-version = "py312"
 extend-exclude = ["vendor", "runtime", "dist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B"]
-ignore = ["E731", "B008"]
+ignore = ["E731", "B008", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"headroom/scan.py" = ["E501"]   # embedded PowerShell one-liners

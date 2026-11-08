@@ -20,18 +20,16 @@ radiator fans stop. The BIOS thermal limit (85 C) is a hardware backstop.
 CO only LOWERS voltage; Headroom never raises PPT/TDC/EDC, Vcore or VSOC.
 """
 import glob
-import json
+import ntpath
 import os
 import re
 import shutil
 import threading
 import time
-import urllib.request
 
 from . import cpu_bench, uplift
-from .common import TOOLS_DIR, is_admin, ps, run, whea_events_since
+from .common import PINNED, TOOLS_DIR, is_admin, ps, run, verified_download, whea_events_since
 
-CC_API = "https://api.github.com/repos/sp00n/CoreCycler/releases/latest"
 TASK = r"\CoreCycler\CoreCycler AutoMode Startup Task"
 RESUME_TASK = "Headroom Resume"
 MARGIN = 3
@@ -43,25 +41,15 @@ def find_corecycler():
 
 
 def install_corecycler(log):
-    """Download the latest release from GitHub and unpack it with Windows'
-    built-in tar (bsdtar reads 7z)."""
-    os.makedirs(os.path.join(TOOLS_DIR, "_dl"), exist_ok=True)
-    req = urllib.request.Request(CC_API, headers={"User-Agent": "Headroom-OC-tool"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        rel = json.loads(r.read())
-    asset = next(a for a in rel["assets"] if a["name"].endswith(".7z"))
-    dst = os.path.join(TOOLS_DIR, "_dl", asset["name"])
-    if not os.path.exists(dst) or os.path.getsize(dst) != asset["size"]:
-        log("Downloading %s (%d MB)" % (asset["name"], asset["size"] >> 20))
-        req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "Headroom-OC-tool"})
-        with urllib.request.urlopen(req, timeout=120) as r, open(dst + ".part", "wb") as f:
-            shutil.copyfileobj(r, f)
-        os.replace(dst + ".part", dst)
+    """Download the pinned release (SHA-256 checked) and unpack it with Windows'
+    built-in tar (bsdtar reads 7z and refuses '..' paths). It runs elevated, so it
+    lives in the admin-only tools folder."""
+    dst = verified_download("corecycler", os.path.join(TOOLS_DIR, "_dl"), log)
     run(["tar", "-xf", dst, "-C", TOOLS_DIR], timeout=300)
     path = find_corecycler()
     if not path:
         raise RuntimeError("Unpacking failed: open %s in Explorer, extract it into %s and retry." % (dst, TOOLS_DIR))
-    log("CoreCycler %s ready in %s" % (rel["tag_name"], path))
+    log("CoreCycler %s ready in %s" % (PINNED["corecycler"]["version"], path))
     return path
 
 
@@ -142,12 +130,23 @@ def corecycler_running():
     return out.strip() not in ("", "0")
 
 
+def kill_script(cc):
+    """PowerShell that stops CoreCycler and the stress programs it started.
+    Matched by exact folder prefix (StartsWith, not -like: '[' in a path is a
+    wildcard there). An empty or relative folder must never become 'kill everything'."""
+    parts = ["$_.CommandLine -match 'script-corecycler'"]
+    if cc and ntpath.isabs(cc) and len(cc.rstrip("\\/")) > 3:
+        prefix = cc.rstrip("\\/") + "\\"
+        parts.insert(0, "($_.ExecutablePath -and $_.ExecutablePath.StartsWith('%s', "
+                        "[StringComparison]::OrdinalIgnoreCase))" % prefix.replace("'", "''"))
+    return ("Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and (%s) } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" % " -or ".join(parts))
+
+
 def kill_stress(cc, log, reason):
     """Emergency stop: the stress program, CoreCycler itself, and its resume task."""
     log("CPU EMERGENCY STOP: " + reason, "error")
-    esc = cc.replace("'", "''")
-    ps("Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '%s*' -or "
-       "$_.CommandLine -match 'script-corecycler' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" % esc)
+    ps(kill_script(cc))
     run(["schtasks", "/delete", "/tn", TASK, "/f"])
 
 

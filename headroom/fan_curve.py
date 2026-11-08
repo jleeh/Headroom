@@ -38,6 +38,17 @@ DEFAULT = {
     "mem": [[62, 0], [70, 40], [80, 60], [88, 80], [94, 100]],
 }
 EMERG_CORE, EMERG_MEM = 80, 94
+# Other programs that drive GPU fans. Two controllers writing the same fan fight each
+# other (speeds flip every second, neither curve holds), so Headroom yields to them:
+# it never writes the fans while one runs and hands control back to the card.
+OTHER_FAN_CONTROLLERS = {
+    "glint.exe": "Glint", "fancontrol.exe": "FanControl", "msiafterburner.exe": "MSI Afterburner",
+    "signalrgb.exe": "SignalRGB", "argusmonitor.exe": "Argus Monitor", "evgaprecisionx1.exe": "EVGA Precision X1",
+    "asusgputweakiii.exe": "ASUS GPU Tweak III", "nzxt cam.exe": "NZXT CAM", "icue.exe": "Corsair iCUE",
+    "fanctrl.exe": "FanCtrl",
+}
+CONTEST_SEC = 8           # read-back differs from what we set for this long = someone else is writing
+CONTEST_TOL = 12          # % tolerance (fans lag and report coarsely)
 DOWN_PER_SEC = 2          # ramp down slowly, up instantly
 AUTO_AFTER_SEC = 30       # curve must say 0% this long before handing back to the card
 
@@ -109,6 +120,29 @@ def status():
     return s
 
 
+def other_controllers(proc_lister=None):
+    """Names of running programs that also control GPU fans."""
+    from .common import process_running
+    lister = proc_lister or process_running
+    return [OTHER_FAN_CONTROLLERS[n] for n in lister(*OTHER_FAN_CONTROLLERS)]
+
+
+class ContestJudge:
+    """Detects an unknown second controller: the fan keeps reading back far from the
+    duty we set although the card had time to get there."""
+
+    def __init__(self):
+        self.since = None
+
+    def check(self, target, reading, now):
+        if target is None or reading is None or abs(reading - target) <= CONTEST_TOL:
+            self.since = None
+            return False
+        if self.since is None:
+            self.since = now
+        return now - self.since >= CONTEST_SEC
+
+
 def interp(points, t):
     if t is None or not points:
         return 0
@@ -178,8 +212,30 @@ def run_daemon(log=print):
     to_auto()
     log("Fan curve running (fan range %d-%d%%)" % (fmin, fmax))
     idle_off = 0
+    judge = ContestJudge()
+    yielded = None          # name of the program we yielded to
+    last_proc_check = 0
     try:
         while True:
+            now = time.time()
+            if now - last_proc_check >= 5:
+                last_proc_check = now
+                others = other_controllers()
+                if others and yielded is None:
+                    yielded = others[0]
+                    to_auto()
+                    log("Fans: %s is controlling the GPU fans, Headroom's curve is paused (no fighting over the fans)" % yielded, "warn")
+                elif not others and yielded and not yielded.startswith("another program"):
+                    log("Fans: %s closed, Headroom's curve resumes" % yielded)
+                    yielded = None
+            if yielded:
+                # don't touch the fans at all (no reset either: that would fight the other program)
+                _write(STATUS_FILE, {"t": now, "pid": os.getpid(), "mode": "yielded", "why": "%s controls the fans" % yielded,
+                                     "target": None, "fan": nv.fan_pct(), "core": None, "mj": None, "yielded_to": yielded})
+                if not load_config()["enabled"]:
+                    break
+                time.sleep(1)
+                continue
             cfg = load_config()
             b = _read(BOOST_FILE)
             boost = b["pct"] if b and b.get("until", 0) > time.time() else 0
@@ -209,6 +265,11 @@ def run_daemon(log=print):
                     want = max(fmin, state["cur"] - DOWN_PER_SEC)
             else:
                 state["zero_since"] = None
+            if state["manual"] and judge.check(state["cur"], nv.fan_pct(), now):
+                yielded = "another program (fan speed keeps changing away from Headroom's setting)"
+                state["manual"] = False   # stop writing; don't reset, the other program is in charge
+                log("Fans: another program is setting the GPU fans; Headroom's curve is paused. Close it, then toggle the curve.", "warn")
+                continue
             if want > 0:
                 want = max(fmin, min(fmax, want))
                 if state["manual"] and want < state["cur"] and why == "curve":

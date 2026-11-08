@@ -27,6 +27,34 @@ def listening_pid(netstat_out, port=LHM_PORT):
     return None
 
 
+def listener_pid_win(port=LHM_PORT):
+    """PID listening on 127.0.0.1/0.0.0.0:<port> from the IPv4 listener table
+    (GetExtendedTcpTable). netstat output isn't reliable enough for this: on some
+    systems it shows listeners as CLOSED."""
+    import ctypes
+    import ctypes.wintypes as W
+    ip = ctypes.windll.iphlpapi
+    size = W.DWORD(0)
+    ip.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, 3, 0)   # AF_INET, TCP_TABLE_OWNER_PID_LISTENER
+    for _ in range(3):
+        buf = ctypes.create_string_buffer(size.value + 4096)
+        size = W.DWORD(len(buf))
+        if ip.GetExtendedTcpTable(buf, ctypes.byref(size), False, 2, 3, 0) == 0:
+            break
+    else:
+        raise OSError("GetExtendedTcpTable failed")
+    n = int.from_bytes(buf.raw[0:4], "little")
+    for i in range(n):
+        off = 4 + i * 24          # MIB_TCPROW_OWNER_PID: state, laddr, lport, raddr, rport, pid
+        row = buf.raw[off:off + 24]
+        laddr = row[4:8]
+        lport = int.from_bytes(row[8:10], "big")
+        pid = int.from_bytes(row[20:24], "little")
+        if lport == port and laddr in (b"\x7f\x00\x00\x01", b"\x00\x00\x00\x00"):
+            return pid
+    return None
+
+
 def _proc_info(pid):
     """(image path, elevated) for a PID, via the Win32 API. (None, False) if unknown."""
     import ctypes
@@ -93,7 +121,10 @@ class Lhm:
         cpid, at, prob = self._owner
         if cpid is not None and time.time() - at < OWNER_RECHECK_SEC:
             return prob      # netstat is too slow to run every second; the owner rarely changes
-        pid = listening_pid(run(["netstat", "-ano", "-p", "TCP"], 10))
+        try:
+            pid = listener_pid_win()
+        except Exception:  # noqa: BLE001
+            pid = listening_pid(run(["netstat", "-ano", "-p", "TCP"], 10))
         if pid is None:
             self._owner = (None, 0, None)
             return None    # nothing listening: the request fails on its own

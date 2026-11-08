@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test tools
+        run: python -m pip install --disable-pip-version-check pytest cryptography ruff
+      - name: Lint
+        run: ruff check .
+      - name: Tests
+        run: python -m pytest -q
+      - name: UI script syntax
+        if: matrix.os == 'ubuntu-latest'
+        run: node --check web/app.js
+
+  build-csharp:
+    name: Compile launcher + installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compile (WebView2 SDK hash-checked by build.ps1)
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File installer\build.ps1 -ExeOnly
+      - name: Compile installer (dummy payload)
+        shell: powershell
+        run: |
+          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          New-Item -ItemType Directory dist -Force | Out-Null
+          Set-Content dist\version.txt "0.0.0" -NoNewline; Set-Content dist\payload.zip "x"
+          & $csc /nologo /target:winexe /platform:x64 /win32manifest:installer\setup.manifest /win32icon:assets\headroom.ico `
+            /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll `
+            /resource:dist\payload.zip,payload.zip /resource:dist\version.txt,version.txt /out:dist\Setup.exe installer\Setup.cs
+          if ($LASTEXITCODE) { exit 1 }

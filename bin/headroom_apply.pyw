@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo / install root
 from headroom import stability  # noqa: E402
 from headroom.common import SETTINGS_FILE, Log, State, read_json, run  # noqa: E402
 from headroom.nvml import Nvml  # noqa: E402
@@ -57,7 +57,7 @@ except Exception as e:  # noqa: BLE001
     log("Logon apply failed: %s" % e, "error")
 
 try:
-    subprocess.Popen([PYW, os.path.join(APP_DIR, "headroom_monitor.pyw")], cwd=APP_DIR,
+    subprocess.Popen([PYW, os.path.join(APP_DIR, "bin", "headroom_monitor.pyw")], cwd=APP_DIR,
                      creationflags=0x00000008 | 0x00000200, close_fds=True)
 except OSError as e:
     log("Could not start the monitor: %s" % e, "error")

@@ -4,7 +4,7 @@ and hands the fans back to the card. Run by the uninstaller; safe to run any tim
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo / install root
 try:
     from headroom.nvml import Nvml
     nv = Nvml()

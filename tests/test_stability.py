@@ -259,7 +259,7 @@ def test_install_remove_tasks():
     cr = [c for c in calls if c[1] == "/create"]
     assert len(cr) == 2 and cr[0][cr[0].index("/ec") + 1] == "System" and cr[1][cr[1].index("/ec") + 1] == "Application"
     assert all(c[c.index("/sc") + 1] == "onevent" and "/rl" in c and "/f" in c for c in cr)
-    assert cr[0][cr[0].index("/tr") + 1] == '"C:\\py\\pythonw.exe" "C:\\app\\headroom_crash.pyw"'
+    assert cr[0][cr[0].index("/tr") + 1] == '"C:\\py\\pythonw.exe" "C:\\app\\bin\\headroom_crash.pyw"'
     assert all(len(c[c.index("/mo") + 1]) < 1000 for c in cr)
     S.remove_event_tasks(fake)
     assert sum(1 for c in calls if c[1] == "/delete") == 2

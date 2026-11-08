@@ -46,7 +46,7 @@ APP_XPATH = ("*[System[Provider[@Name='Application Error'] and EventID=1000] and
 
 def install_event_tasks(pythonw, app_dir, run_fn=run):
     """Create the two event-triggered tasks (needs admin). Returns {task: ok}."""
-    tr = '"%s" "%s"' % (pythonw, ntpath.join(app_dir, "headroom_crash.pyw"))
+    tr = '"%s" "%s"' % (pythonw, ntpath.join(app_dir, "bin", "headroom_crash.pyw"))
     res = {}
     for name, chan, xp in zip(TASKS, ("System", "Application"), (SYSTEM_XPATH, APP_XPATH), strict=True):
         run_fn(["schtasks", "/create", "/f", "/rl", "highest", "/sc", "onevent", "/ec", chan,

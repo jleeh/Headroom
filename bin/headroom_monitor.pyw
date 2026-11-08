@@ -8,7 +8,7 @@ import time
 import traceback
 from collections import deque
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo / install root
 from headroom import fan_curve, stability  # noqa: E402
 from headroom.common import DATA_DIR, SETTINGS_FILE, Log, State, read_json  # noqa: E402
 

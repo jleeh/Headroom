@@ -28,7 +28,7 @@ import threading
 import time
 
 from . import cpu_bench, uplift
-from .common import PINNED, TOOLS_DIR, is_admin, ps, run, verified_download, whea_events_since
+from .common import PINNED, TOOLS_DIR, is_admin, ps, run, script, verified_download, whea_events_since
 
 TASK = r"\CoreCycler\CoreCycler AutoMode Startup Task"
 RESUME_TASK = "Headroom Resume"
@@ -227,9 +227,8 @@ def set_cpu_watchdog_at_logon(on):
     import sys
     if on:
         pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "headroom_cpuwatch.pyw")
         run(["schtasks", "/create", "/f", "/rl", "highest", "/sc", "onlogon", "/tn", WATCH_TASK,
-             "/tr", '"%s" "%s"' % (pyw, script)])
+             "/tr", '"%s" "%s"' % (pyw, script("headroom_cpuwatch.pyw"))])
     else:
         run(["schtasks", "/delete", "/f", "/tn", WATCH_TASK])
 

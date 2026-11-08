@@ -4,7 +4,7 @@ Everything it writes there is treated as untrusted by the elevated side."""
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo / install root
 from headroom import research_cli  # noqa: E402
 
 if __name__ == "__main__":

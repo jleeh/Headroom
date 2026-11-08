@@ -14,7 +14,7 @@ import time
 
 from . import cpu_tune, fan_curve, gpu_tune, uplift
 from .setup import Setup
-from .common import APP_DIR, DATA_DIR, SCAN_FILE, Log, State, is_admin, load_profiles, read_json, run
+from .common import APP_DIR, DATA_DIR, SCAN_FILE, Log, State, is_admin, load_profiles, read_json, run, script
 from .nvml import CLK_GRAPHICS, CLK_MEM, Nvml
 from .sensors import Telemetry
 
@@ -285,7 +285,7 @@ class Controller:
         if on:
             if not self.state.get("gpu", "result"):
                 raise RuntimeError("Run Auto OC first")
-            cmd = '"%s" "%s"' % (PYW, os.path.join(APP_DIR, "headroom_apply.pyw"))
+            cmd = '"%s" "%s"' % (PYW, script("headroom_apply.pyw"))
             run(["schtasks", "/create", "/f", "/rl", "highest", "/sc", "onlogon", "/tn", GPU_TASK, "/tr", cmd, "/delay", "0001:00"])
             self.log("GPU profile will be applied 1 min after logon (not after a crash).")
         else:
@@ -299,7 +299,7 @@ class Controller:
         working after this window closes; it stops itself when the curve is off)."""
         if fan_curve.status()["running"]:
             return
-        subprocess.Popen([PYW, os.path.join(APP_DIR, "headroom_fans.pyw")], cwd=APP_DIR,
+        subprocess.Popen([PYW, script("headroom_fans.pyw")], cwd=APP_DIR,
                          creationflags=0x00000008 | 0x00000200, close_fds=True)
         time.sleep(0.3)
 
@@ -321,7 +321,7 @@ class Controller:
     def fans_set_logon(self, on):
         self.need()
         if on:
-            cmd = '"%s" "%s"' % (PYW, os.path.join(APP_DIR, "headroom_fans.pyw"))
+            cmd = '"%s" "%s"' % (PYW, script("headroom_fans.pyw"))
             run(["schtasks", "/create", "/f", "/rl", "highest", "/sc", "onlogon", "/tn", fan_curve.FAN_TASK, "/tr", cmd])
             self.log("Fan curve will start at logon.")
         else:

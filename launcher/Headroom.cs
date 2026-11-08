@@ -74,7 +74,7 @@ class Headroom
                     MessageBox.Show("Headroom's Python runtime is missing. Reinstall Headroom (or install Python 3.12 for a source checkout).", "Headroom", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
-                var psi = new ProcessStartInfo(pyw, "\"" + Path.Combine(Dir, "headroom_server.pyw") + "\"")
+                var psi = new ProcessStartInfo(pyw, "\"" + Path.Combine(Dir, @"bin\headroom_server.pyw") + "\"")
                     { WorkingDirectory = Dir, UseShellExecute = false, CreateNoWindow = true };
                 psi.EnvironmentVariables["HEADROOM_TOKEN"] = Token;
                 py = Process.Start(psi);

@@ -1,16 +1,17 @@
 # build output
 dist/
 *.exe
-!installer/*.cs
 # downloaded at build time (installer/build.ps1)
 Microsoft.Web.WebView2.Core.dll
 Microsoft.Web.WebView2.WinForms.dll
 WebView2Loader.dll
 vendor/
-# runtime / local
+runtime/
+# downloaded at run time (CoreCycler, LibreHardwareMonitor, PresentMon)
+/tools/
+# local
 __pycache__/
 *.pyc
+.pytest_cache/
 .ruff_cache/
-tools/
-dev/selftest_result.txt
-selftest_result.txt
+dev/selftest_result*.txt

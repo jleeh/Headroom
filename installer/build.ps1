@@ -3,12 +3,17 @@ Builds dist\HeadroomSetup-<version>.exe: Headroom + its own Python runtime + the
 packed into a single installer. Needs only Windows (the .NET Framework C# compiler ships with it)
 and a 64-bit Python 3.12 to copy the runtime from (python.org installer or `winget install Python.Python.3.12`).
 
-  powershell -ExecutionPolicy Bypass -File installer\build.ps1 [-Version 1.0.0] [-Python C:\path\to\python.exe]
+  powershell -ExecutionPolicy Bypass -File installer\build.ps1 [-Version 1.1.0] [-Python C:\path\to\python.exe]
+      [-ExeOnly]                      dev build: just Headroom.exe + WebView2 DLLs next to the sources
+      [-CertThumbprint <sha1>]        Authenticode-sign Headroom.exe and the installer (signtool from the Windows SDK)
 #>
 param(
     [string]$Version = "1.0.0",
     [string]$Python = "",
-    [string]$WebView2Version = "1.0.4314.35"
+    [string]$WebView2Version = "1.0.4314.35",
+    [switch]$ExeOnly,
+    [string]$CertThumbprint = "",
+    [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -17,16 +22,27 @@ $stage = Join-Path $dist "stage"
 $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
+function Sign($file) {
+    if (-not $CertThumbprint) { return }
+    $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+        Sort-Object FullName | Select-Object -Last 1
+    if (-not $signtool) { throw "signtool.exe not found (install the Windows SDK) - needed for -CertThumbprint" }
+    & $signtool.FullName sign /sha1 $CertThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $file
+    if ($LASTEXITCODE) { throw "Signing $file failed" }
+}
+
 # ---- Python to copy the runtime from
-if (-not $Python) {
+if (-not $Python -and -not $ExeOnly) {
     $py = (Get-Command py.exe -ErrorAction SilentlyContinue)
     if ($py) { $Python = (& py.exe -3.12 -c "import sys; print(sys.executable)").Trim() }
     if (-not $Python) { $Python = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe" }
 }
-if (-not (Test-Path $Python)) { throw "Python 3.12 (64-bit) not found. Pass -Python C:\path\to\python.exe" }
-$pyver = (& $Python -c "import sys,struct; print('%d.%d %d' % (sys.version_info[0], sys.version_info[1], struct.calcsize('P')*8))").Trim()
-if ($pyver -ne "3.12 64") { throw "Need 64-bit Python 3.12, got $pyver ($Python)" }
-$pyhome = Split-Path -Parent $Python
+if (-not $ExeOnly) {
+    if (-not (Test-Path $Python)) { throw "Python 3.12 (64-bit) not found. Pass -Python C:\path\to\python.exe" }
+    $pyver = (& $Python -c "import sys,struct; print('%d.%d %d' % (sys.version_info[0], sys.version_info[1], struct.calcsize('P')*8))").Trim()
+    if ($pyver -ne "3.12 64") { throw "Need 64-bit Python 3.12, got $pyver ($Python)" }
+    $pyhome = Split-Path -Parent $Python
+}
 
 # ---- WebView2 SDK (NuGet) -> repo root, next to Headroom.exe. Pinned by hash: the build stops on a mismatch.
 $wvHash = @{
@@ -59,20 +75,25 @@ foreach ($f in $wv) { CheckHash (Join-Path $root $f) }
 Step "Compiling Headroom.exe"
 New-Item -ItemType Directory $dist -Force | Out-Null
 Push-Location $root
-& $csc /nologo /target:winexe /win32manifest:app.manifest /win32icon:headroom.ico /platform:x64 `
-    /r:Microsoft.Web.WebView2.Core.dll /r:Microsoft.Web.WebView2.WinForms.dll "/out:$dist\Headroom.exe" Headroom.cs
+& $csc /nologo /target:winexe /win32manifest:launcher\app.manifest /win32icon:assets\headroom.ico /platform:x64 `
+    /r:Microsoft.Web.WebView2.Core.dll /r:Microsoft.Web.WebView2.WinForms.dll "/out:$dist\Headroom.exe" launcher\Headroom.cs
 if ($LASTEXITCODE) { throw "Headroom.exe failed to compile" }
 Pop-Location
+Sign "$dist\Headroom.exe"
+if ($ExeOnly) {
+    Copy-Item "$dist\Headroom.exe" $root -Force
+    Step "Dev build ready: $root\Headroom.exe (SDK: py -3.12 -m pip install --require-hashes --no-deps -r installer\requirements.txt --target vendor)"
+    return
+}
 
 # ---- stage the app
 Step "Staging files"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory $stage | Out-Null
 Copy-Item "$dist\Headroom.exe" $stage
-$files = @("headroom.ico", "headroom.png", "headroom_server.pyw", "headroom_apply.pyw", "headroom_fans.pyw",
-           "headroom_reset.pyw", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md") + $wv
+$files = @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md") + $wv
 foreach ($f in $files) { Copy-Item (Join-Path $root $f) $stage }
-foreach ($d in @("headroom", "web", "profiles")) {
+foreach ($d in @("headroom", "bin", "web", "profiles", "assets")) {
     Copy-Item (Join-Path $root $d) (Join-Path $stage $d) -Recurse
 }
 Get-ChildItem $stage -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
@@ -130,10 +151,11 @@ Set-Content (Join-Path $dist "version.txt") $Version -Encoding ASCII -NoNewline
 
 Step "Compiling the installer"
 $out = Join-Path $dist "HeadroomSetup-$Version.exe"
-& $csc /nologo /target:winexe /platform:x64 "/win32manifest:$PSScriptRoot\setup.manifest" "/win32icon:$root\headroom.ico" `
+& $csc /nologo /target:winexe /platform:x64 "/win32manifest:$PSScriptRoot\setup.manifest" "/win32icon:$root\assets\headroom.ico" `
     /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll `
     "/resource:$payload,payload.zip" "/resource:$(Join-Path $dist 'version.txt'),version.txt" "/out:$out" "$PSScriptRoot\Setup.cs"
 if ($LASTEXITCODE) { throw "Setup.exe failed to compile" }
+Sign $out
 $mb = [math]::Round((Get-Item $out).Length / 1MB, 1)
 $sha = (Get-FileHash $out -Algorithm SHA256).Hash
 Set-Content "$out.sha256" "$sha  $(Split-Path -Leaf $out)" -Encoding ASCII

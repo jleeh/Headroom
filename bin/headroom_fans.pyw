@@ -4,7 +4,7 @@ import os
 import sys
 import traceback
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo / install root
 from headroom.common import DATA_DIR, Log  # noqa: E402
 from headroom.fan_curve import run_daemon  # noqa: E402
 

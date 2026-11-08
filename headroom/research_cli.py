@@ -450,7 +450,7 @@ def run(scan, progress=lambda msg: None, cancel=None, *, timeout=2 * STEP_TIMEOU
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, "request.json"), "w", encoding="utf-8") as f:
         json.dump(build_request(scan), f)
-    script = os.path.join(APP_DIR, "headroom_research_cli.pyw")
+    script = os.path.join(APP_DIR, "bin", "headroom_research_cli.pyw")
     rc, out = _schtasks(task_create_args(_pythonw(), script, run_dir))
     if rc != 0:
         raise ResearchError("Couldn't start the research task as your user account (%s)." % research.clean(out, 200))

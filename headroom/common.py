@@ -35,6 +35,7 @@ PINNED = {
                    "url": "https://github.com/GameTechDev/PresentMon/releases/download/v2.6.0/PresentMon-2.6.0-x64.exe",
                    "sha256": "b2a706bc6ad475749e3b7e3409263aa1e6906d45bdcf993f6dbc0f660188f1af"},
 }
+BIN_DIR = os.path.join(APP_DIR, "bin")                         # .pyw entry points (backend, logon tasks, handlers)
 VENDOR_DIR = os.path.join(APP_DIR, "vendor")                   # pip packages (anthropic SDK) in dev checkouts
 if os.path.isdir(VENDOR_DIR) and VENDOR_DIR not in sys.path:
     sys.path.append(VENDOR_DIR)
@@ -74,6 +75,11 @@ def verified_download(key, dest_dir, log=None, opener=None):
         raise RuntimeError("%s failed its integrity check (SHA-256 %s, expected %s). Not installed." % (pin["name"], got, pin["sha256"]))
     os.replace(part, dst)
     return dst
+
+
+def script(name):
+    """Absolute path of an entry-point script in bin/."""
+    return os.path.join(BIN_DIR, name)
 
 
 def is_admin():

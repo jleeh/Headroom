@@ -8,7 +8,7 @@ import socket
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # repo / install root
 from headroom import cpu_tune  # noqa: E402
 from headroom.common import Log, State, load_profiles  # noqa: E402
 from headroom.sensors import Telemetry  # noqa: E402

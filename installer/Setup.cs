@@ -24,7 +24,8 @@ static class App
     public const string Name = "Headroom";
     public const string UninstKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Headroom";
     public static readonly string[] Tasks = { "Headroom GPU Apply", "Headroom Fan Curve", "Headroom Resume", "Headroom Sensors",
-                                              @"\CoreCycler\CoreCycler AutoMode Startup Task" };
+                                              "Headroom CPU Watchdog", "Headroom Crash Watch (System)", "Headroom Crash Watch (Application)",
+                                              "Headroom Research", @"\CoreCycler\CoreCycler AutoMode Startup Task" };
     public static string Version = "1.0.0";
     public static string DefaultDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Name);
 
@@ -80,6 +81,10 @@ static class App
             PostMessage(h, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
             for (int i = 0; i < 50 && Process.GetProcessesByName("Headroom").Length > 0; i++) Thread.Sleep(500);
         }
+        // ask a running Headroom to shut down cleanly (it puts the fan curve process to rest too). The API needs the
+        // launcher's token, so use the backend's named event (only elevated processes can signal it).
+        try { EventWaitHandle h; if (EventWaitHandle.TryOpenExisting(@"Local\Headroom.Shutdown", out h)) using (h) h.Set(); } catch { }
+        Thread.Sleep(1500);
         foreach (var p in Process.GetProcesses())
         {
             try
@@ -144,7 +149,22 @@ static class Acl
 
 static class Installer
 {
-    static readonly string[] AppDirs = { "headroom", "web", "profiles", "runtime", "vendor" };
+    static readonly string[] AppDirs = { "headroom", "web", "profiles", "runtime", "vendor", "bin" };
+
+    public const string ManifestName = "install.manifest";
+    // files a 1.0.0 install put in the folder (it had no manifest)
+    public static readonly string[] Legacy = { "headroom", "web", "profiles", "runtime", "vendor", "Headroom.exe", "Uninstall.exe",
+        "Microsoft.Web.WebView2.Core.dll", "Microsoft.Web.WebView2.WinForms.dll", "WebView2Loader.dll", "headroom.ico", "headroom.png",
+        "headroom_server.pyw", "headroom_fans.pyw", "headroom_apply.pyw", "headroom_reset.pyw", "LICENSE", "THIRD_PARTY_NOTICES.md",
+        "README.md", "version.txt" };
+
+    /// <summary>Only install into a new/empty folder or over an existing Headroom (uninstall deletes what it installed).</summary>
+    public static void CheckTarget(string dir)
+    {
+        if (!Directory.Exists(dir) || Directory.GetFileSystemEntries(dir).Length == 0) return;
+        if (File.Exists(Path.Combine(dir, ManifestName)) || File.Exists(Path.Combine(dir, "Headroom.exe"))) return;
+        throw new Exception("The folder " + dir + " already has other files in it. Pick an empty folder or a new 'Headroom' folder.");
+    }
 
     public static void Extract(string dir, Action<int, string> progress)
     {
@@ -154,10 +174,12 @@ static class Installer
             var p = Path.Combine(dir, d);
             if (Directory.Exists(p)) Directory.Delete(p, true);
         }
+        var top = new System.Collections.Generic.SortedSet<string>(StringComparer.OrdinalIgnoreCase) { "Uninstall.exe", ManifestName, "tools" };
         using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("payload.zip"))
         using (var z = new ZipArchive(s, ZipArchiveMode.Read))
         {
             int n = 0, total = z.Entries.Count;
+            foreach (var e in z.Entries) { var nm = e.FullName.Replace('\\', '/').TrimStart('/'); if (nm.Length > 0) top.Add(nm.Split('/')[0]); }
             foreach (var e in z.Entries)
             {
                 var name = e.FullName.Replace('\\', '/');
@@ -169,19 +191,26 @@ static class Installer
                 if (progress != null && (++n % 40 == 0 || n == total)) progress(5 + 80 * n / total, "Copying files (" + n + " / " + total + ")");
             }
         }
+        // 1.0.0 kept its entry scripts in the root; they moved to bin\
+        foreach (var old in new[] { "headroom_server.pyw", "headroom_fans.pyw", "headroom_apply.pyw", "headroom_reset.pyw" })
+            if (!top.Contains(old)) try { File.Delete(Path.Combine(dir, old)); } catch { }
+        File.WriteAllLines(Path.Combine(dir, ManifestName), top);
     }
 
     public static void Install(string dir, bool desktop, bool launch, Action<int, string> progress)
     {
         progress = progress ?? ((p, m) => { });
+        dir = Path.GetFullPath(dir);
+        CheckTarget(dir);
         progress(2, "Closing Headroom if it's running");
         App.Stop(dir);
         var oldPy = Path.Combine(dir, @"runtime\python.exe");   // upgrade: the fan curve process was stopped, hand fans back
-        if (File.Exists(oldPy) && File.Exists(Path.Combine(dir, "headroom_reset.pyw")))
-            App.Run(oldPy, "\"" + Path.Combine(dir, "headroom_reset.pyw") + "\" --fans-only", 20000);
+        foreach (var reset in new[] { Path.Combine(dir, @"bin\headroom_reset.pyw"), Path.Combine(dir, "headroom_reset.pyw") })
+            if (File.Exists(oldPy) && File.Exists(reset)) { App.Run(oldPy, "\"" + reset + "\" --fans-only", 20000); break; }
         Directory.CreateDirectory(dir);
-        Acl.Lock(dir, true);   // also covers a custom folder picked with /D= or Browse
+        Acl.Lock(dir, true);   // before any file is written (also a custom folder picked with /D= or Browse)
         Extract(dir, progress);
+        MigrateTasks(dir);
         progress(88, "Creating shortcuts");
         var self = Assembly.GetExecutingAssembly().Location;
         var uninst = Path.Combine(dir, "Uninstall.exe");
@@ -211,6 +240,19 @@ static class Installer
         if (launch) Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = dir });
     }
 
+    /// <summary>Re-point Headroom's logon tasks at the scripts' current location (an upgrade from 1.0.0 moved them to bin\).</summary>
+    static void MigrateTasks(string dir)
+    {
+        var pyw = Path.Combine(dir, @"runtime\pythonw.exe");
+        var map = new[] { new[] { "Headroom GPU Apply", "headroom_apply.pyw", "/delay 0001:00" }, new[] { "Headroom Fan Curve", "headroom_fans.pyw", "" } };
+        foreach (var t in map)
+        {
+            if (!App.Run("schtasks.exe", "/query /tn \"" + t[0] + "\"", 10000).Contains(t[0])) continue;
+            var tr = "\\\"" + pyw + "\\\" \\\"" + Path.Combine(dir, @"bin\" + t[1]) + "\\\"";
+            App.Run("schtasks.exe", "/create /f /rl highest /sc onlogon /tn \"" + t[0] + "\" /tr \"" + tr + "\" " + t[2], 10000);
+        }
+    }
+
     static long DirSize(string d)
     {
         long n = 0;
@@ -233,6 +275,31 @@ static class Installer
 
 static class Uninstaller
 {
+    /// <summary>Delete only what Headroom installed (its manifest, or 1.0.0's known files), then the folder if it's empty.
+    /// Never a blind recursive delete: the folder may have been chosen by hand and hold other things.</summary>
+    static void RemoveInstalled(string dir)
+    {
+        if (!File.Exists(Path.Combine(dir, "Headroom.exe")) && !File.Exists(Path.Combine(dir, Installer.ManifestName))) return;
+        var mf = Path.Combine(dir, Installer.ManifestName);
+        var names = File.Exists(mf) ? File.ReadAllLines(mf) : Installer.Legacy;
+        var root = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
+        for (int i = 0; i < 5; i++)
+        {
+            bool left = false;
+            foreach (var n in names)
+            {
+                if (string.IsNullOrWhiteSpace(n) || n.Contains("..") || n.Contains(":") || n.Contains("\\") || n.Contains("/")) continue;
+                var p = Path.GetFullPath(Path.Combine(dir, n.Trim()));
+                if (!p.StartsWith(root, StringComparison.OrdinalIgnoreCase) || p.Equals(mf, StringComparison.OrdinalIgnoreCase)) continue;
+                try { if (Directory.Exists(p)) Directory.Delete(p, true); else if (File.Exists(p)) File.Delete(p); } catch { left = true; }
+            }
+            if (!left) break;
+            Thread.Sleep(1000);
+        }
+        try { File.Delete(mf); } catch { }
+        try { if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir); } catch { }
+    }
+
     public static int Run(string dir, bool silent, bool removeData)
     {
         if (dir == null)
@@ -248,7 +315,7 @@ static class Uninstaller
             Process.Start(new ProcessStartInfo(tmp, "/uninstall /dir \"" + dir + "\"" + (silent ? " /S" : "") + (removeData ? " /removedata" : "")) { UseShellExecute = false });
             return 0;
         }
-        if (!File.Exists(Path.Combine(dir, "Headroom.exe")) || !File.Exists(Path.Combine(dir, "headroom_server.pyw")))
+        if (!File.Exists(Path.Combine(dir, "Headroom.exe")) || !(File.Exists(Path.Combine(dir, @"bin\headroom_server.pyw")) || File.Exists(Path.Combine(dir, "headroom_server.pyw"))))
             throw new InvalidOperationException("No Headroom installation found in " + dir);   // never delete some other folder
         if (!silent)
         {
@@ -261,14 +328,15 @@ static class Uninstaller
         }
         App.Stop(dir);
         var py = Path.Combine(dir, @"runtime\python.exe");
-        if (File.Exists(py)) App.Run(py, "\"" + Path.Combine(dir, "headroom_reset.pyw") + "\"", 30000);
+        foreach (var reset in new[] { Path.Combine(dir, @"bin\headroom_reset.pyw"), Path.Combine(dir, "headroom_reset.pyw") })
+            if (File.Exists(py) && File.Exists(reset)) { App.Run(py, "\"" + reset + "\"", 30000); break; }
         foreach (var t in App.Tasks) App.Run("schtasks.exe", "/delete /f /tn \"" + t + "\"", 10000);
         var local = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Headroom");
         App.Stop(Path.Combine(local, "tools"));   // tools downloaded by 1.0.0 (newer versions keep them in <dir>\tools)
         try { File.Delete(App.StartMenuLnk); } catch { }
         try { File.Delete(App.DesktopLnk); } catch { }
         using (var hk = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)) { try { hk.DeleteSubKeyTree(App.UninstKey, false); } catch { } }
-        for (int i = 0; i < 5 && Directory.Exists(dir); i++) { try { Directory.Delete(dir, true); } catch { Thread.Sleep(1000); } }
+        RemoveInstalled(dir);
         if (removeData)
         {
             var roaming = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Headroom");

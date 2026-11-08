@@ -118,6 +118,25 @@ def memory_advice(scan):
                    "verdict": verdict, "notes": notes}
 
 
+RAPTOR_FIX = 0x12B   # Intel's Vmin-shift fix for 13th/14th gen desktop CPUs
+
+
+def cpu_advisory(cpu):
+    """Hardware-specific warnings for CPUs Headroom can't tune but can still protect.
+    13th/14th gen Core desktop chips degrade on microcode older than 0x12B."""
+    if cpu.get("family") != "intel-raptorlake":
+        return None
+    mc = cpu.get("microcode")
+    if mc is None:
+        return {"level": "warn", "text": "13th/14th gen Core: make sure the BIOS has Intel microcode 0x12B or newer "
+                                         "(fixes the Vmin-shift degradation) and use Intel's default power profile."}
+    if mc < RAPTOR_FIX:
+        return {"level": "bad", "text": "This CPU runs microcode 0x%X, older than 0x12B: 13th/14th gen chips can degrade "
+                                        "permanently on it. Update the motherboard BIOS now, then pick Intel's default "
+                                        "power profile in it." % mc}
+    return {"level": "good", "text": "Microcode 0x%X includes Intel's 13th/14th gen degradation fix (0x12B+)." % mc}
+
+
 def board_entry(scan, families, research_board=None, cpu_profile=None):
     b = scan.get("board") or {}
     name = (b.get("model") or "Motherboard").strip()
@@ -172,6 +191,9 @@ def build(scan, research=None, cooling=None):
         cp, src = dict(fam), "family"
     cp["family"] = c.get("family")
     cp["co_supported"] = bool((scan.get("caps") or {}).get("cpu_co"))
+    adv = cpu_advisory(c)
+    if adv:
+        cp["advisory"] = adv
     out["cpu"] = {cname: clamp_cpu(cp, c.get("vendor"))}
     out["_sources"]["cpu"] = src
 

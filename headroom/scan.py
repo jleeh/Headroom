@@ -131,6 +131,21 @@ def _nvidia():
     return out
 
 
+def microcode_revision(raw=None):
+    """CPU microcode revision Windows loaded ('Update Revision' registry value: the
+    revision is the upper 32 bits of the little-endian 8-byte value). None if unknown."""
+    if raw is None:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+                raw = winreg.QueryValueEx(k, "Update Revision")[0]
+        except (ImportError, OSError):
+            return None
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) < 8:
+        return None
+    return int.from_bytes(raw[4:8], "little") or None
+
+
 def scan(log=print):
     t0 = time.time()
     raw = ps(_CIM, timeout=90)
@@ -145,6 +160,7 @@ def scan(log=print):
     cpu = d.get("cpu") or {}
     cpu["family"] = cpu_family(cpu.get("name"))
     cpu["vendor"] = "amd" if cpu["family"].startswith("amd") else "intel" if cpu["family"].startswith("intel") else "other"
+    cpu["microcode"] = microcode_revision()
     board = d.get("board") or {}
     board["vendor"] = board_vendor(board.get("maker"), board.get("model"))
     nv = _nvidia()

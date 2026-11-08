@@ -60,6 +60,10 @@ class Setup:
         self.progress = ""
         self.error = None
         self.last_research = None
+        self.cancel_ev = threading.Event()
+
+    def cancel(self):
+        self.cancel_ev.set()
 
     # ------------------------------------------------------------- status
     def status(self):
@@ -125,20 +129,29 @@ class Setup:
         sc = read_json(SCAN_FILE)
         if not sc:
             raise RuntimeError("Scan the hardware first")
-        if not research.has_key():
-            raise RuntimeError("Add an Anthropic API key first")
+        backend = research.get_settings().get("research_backend")
+        if backend == "api":
+            if not research.has_key():
+                raise RuntimeError("Add an Anthropic API key first")
+            research.check_budget()
+        self.cancel_ev.clear()
 
         def go():
             def prog(m):
                 self.progress = m
-            r = research.run(sc, prog)
+            r = research.run_research(sc, prog, cancel=self.cancel_ev)
             r["parts"] = _parts(sc)
             self.last_research = r
             write_json(os.path.join(os.path.dirname(SCAN_FILE), "research.json"), r)
             u = r.get("usage") or {}
-            self.log("Research done: %d sources, %d web searches, %d pages, %d input / %d output tokens" % (
-                len(r["sources"]), u.get("web_searches", 0), u.get("web_fetches", 0),
-                u.get("input_tokens", 0), u.get("output_tokens", 0)))
+            self.log("Research done (%s): %d sources, %d web searches, %d pages, %d input (+%d cached) / %d output tokens, $%.2f" % (
+                r.get("backend", "api"), len(r["sources"]), u.get("web_searches", 0), u.get("web_fetches", 0),
+                u.get("input_tokens", 0), u.get("cache_read_tokens", 0) + u.get("cache_write_tokens", 0),
+                u.get("output_tokens", 0), u.get("cost_usd", 0) or 0))
+            rej = (r.get("board") or {}).get("rejected") or []
+            if rej:
+                self.log("Research: %d BIOS suggestion(s) were left off the sheet because they are outside what Headroom "
+                         "considers safe (see Profiles)" % len(rej), "warn")
             self._build(sc, r)
         self._bg("Researching with Claude", go)
 

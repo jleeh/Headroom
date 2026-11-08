@@ -12,9 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import subprocess
 import time
 
-from . import cpu_tune, fan_curve, gpu_tune, uplift
-from .setup import Setup
-from .common import APP_DIR, DATA_DIR, SCAN_FILE, Log, State, is_admin, load_profiles, read_json, run, script
+from . import __version__, cpu_tune, fan_curve, gpu_tune, presentmon, research, research_cli, stability, update, uplift
+from .setup import Setup, remove_legacy_tasks
+from .common import APP_DIR, DATA_DIR, SCAN_FILE, SETTINGS_FILE, Log, State, is_admin, load_profiles, read_json, run, script, write_json
 from .nvml import CLK_GRAPHICS, CLK_MEM, Nvml
 from .sensors import Telemetry
 
@@ -76,6 +76,15 @@ class Controller:
         self.cpu_trip = None
         self.gpu_logon = task_exists(GPU_TASK)
         self.fan_logon = task_exists(fan_curve.FAN_TASK)
+        self.crash_watch = stability.tasks_installed()
+        self.game = None                       # running game measurement thread
+        self.game_prog = {"busy": False, "msg": ""}
+        self.game_cancel = threading.Event()
+        self.update_info = None                # last update check (with the signed manifest if verified)
+        self.cli_info = research_cli.available()
+        self._fan_check = 0
+        if is_admin():
+            remove_legacy_tasks(self.log)
         if fan_curve.load_config()["enabled"]:
             self.fans_ensure()
         self.log("Headroom started (%s)" % ("administrator" if is_admin() else "NOT administrator - read-only"))
@@ -130,7 +139,22 @@ class Controller:
         self.cpu_trip = reason
 
     # ------------------------------------------------------------------ status
+    def _fans_watchdog(self):
+        """A fan process that was killed can't hand the fans back; do it for it."""
+        now = time.time()
+        if not self.nv or not is_admin() or now - self._fan_check < 10:
+            return
+        self._fan_check = now
+        try:
+            if stability.fans_stale(fan_curve.status(), now):
+                self.nv.reset_fans()
+                write_json(fan_curve.STATUS_FILE, {"t": 0, "mode": "stopped"})
+                self.log("The fan curve process had stopped without handing the fans back: returned them to the card", "warn")
+        except Exception as e:  # noqa: BLE001
+            self.log("fan watchdog: %s" % e, "warn")
+
     def status(self, since=0):
+        self._fans_watchdog()
         s = self.tele.get()
         g = dict(s.get("gpu") or {})
         if self.nv and g and "error" not in g:
@@ -166,6 +190,13 @@ class Controller:
                      "emergency": [fan_curve.EMERG_CORE, fan_curve.EMERG_MEM]},
             "cpu": self.cpu_view(),
             "bench": st.get("bench", default=[]) or [],
+            "version": __version__,
+            "stability": stability.summary(self.state, tasks=self.crash_watch),
+            "recheck": st.get("gpu", "recheck"), "reverted": st.get("gpu", "stability_reverted"),
+            "games": {"results": (st.get("games", default=[]) or [])[:5], "progress": self.game_prog,
+                      "mode": self.apply_settings()},
+            "research": dict(research.get_settings(), estimate=research.estimate(), cli=self.cli_info),
+            "update": {k: v for k, v in (self.update_info or {}).items() if k != "manifest"},
             "logs": logs, "seq": self.seq,
         }
 
@@ -288,6 +319,8 @@ class Controller:
             cmd = '"%s" "%s"' % (PYW, script("headroom_apply.pyw"))
             run(["schtasks", "/create", "/f", "/rl", "highest", "/sc", "onlogon", "/tn", GPU_TASK, "/tr", cmd, "/delay", "0001:00"])
             self.log("GPU profile will be applied 1 min after logon (not after a crash).")
+            if not self.crash_watch:
+                self.stability_watch(True)   # an overclock that runs unattended should be watched
         else:
             run(["schtasks", "/delete", "/f", "/tn", GPU_TASK])
             self.log("Apply-at-logon removed")
@@ -344,6 +377,87 @@ class Controller:
             cpu_tune.kill_stress(cpu_tune.find_corecycler() or "", self.log, "user pressed RESET ALL")
         self.log("RESET: GPU at stock. CPU settings live in the BIOS: set PBO / Curve Optimizer back to Auto there "
                  "(or Load Optimized Defaults, F5) to fully revert the CPU.", "warn")
+
+    # ---- crash watch ---------------------------------------------------------
+    def stability_watch(self, on):
+        self.need()
+        if on:
+            stability.install_event_tasks(PYW, APP_DIR)
+        else:
+            stability.remove_event_tasks()
+        self.crash_watch = stability.tasks_installed()
+        self.log("Crash watch %s" % ("on: driver resets, WHEA errors and bugchecks are recorded and the overclock "
+                                     "backs off on its own" if self.crash_watch else "off"))
+
+    def stability_check(self):
+        self.need()
+        return {"new": stability.run_locked(stability.process, self.state, self.nv, self.log) or 0}
+
+    # ---- per-game apply + game measurement ----------------------------------
+    @staticmethod
+    def apply_settings():
+        s = read_json(SETTINGS_FILE, {}) or {}
+        return {"mode": s.get("gpu_apply_mode", "always"), "games": s.get("games", [])}
+
+    def set_apply_settings(self, body):
+        mode = body.get("mode", "always")
+        if mode not in ("always", "games"):
+            raise RuntimeError("mode must be 'always' or 'games'")
+        games = [g for g in (body.get("games") or []) if isinstance(g, str) and presentmon.valid_process(g)][:30]
+        s = read_json(SETTINGS_FILE, {}) or {}
+        s.update(gpu_apply_mode=mode, games=games)
+        write_json(SETTINGS_FILE, s)
+        self.log("GPU overclock applies %s" % ("always" if mode == "always" else "only while these run: " + ", ".join(games)))
+        return self.apply_settings()
+
+    def game_measure(self, body):
+        self.need()
+        if self.game and self.game.is_alive():
+            raise RuntimeError("A measurement is already running")
+        proc = str(body.get("process") or "")
+        if not presentmon.valid_process(proc):
+            raise RuntimeError("Pick the game's .exe from the list")
+        self.game_cancel.clear()
+
+        def prog(phase, msg):
+            self.game_prog = {"busy": True, "msg": msg}
+
+        def go():
+            self.game_prog = {"busy": True, "msg": "Starting PresentMon"}
+            try:
+                r = presentmon.measure_game(self.nv, self.state, self.log, proc, int(body.get("seconds", 20)),
+                                            int(body.get("rounds", 3)), progress=prog, cancel=self.game_cancel)
+                self.game_prog = {"busy": False, "msg": r.get("verdict", "Done")}
+            except Exception as e:  # noqa: BLE001
+                self.game_prog = {"busy": False, "msg": str(e), "error": True}
+                self.log("Game measurement: %s" % e, "error")
+        self.game = threading.Thread(target=go, daemon=True)
+        self.game.start()
+
+    # ---- research settings + updates ---------------------------------------
+    def research_settings(self, body):
+        d = {}
+        if "backend" in body:
+            d["research_backend"] = body["backend"]
+        if "cap" in body:
+            d["research_cap_usd_month"] = body["cap"]
+        out = research.set_research_settings(d)
+        self.cli_info = research_cli.available()
+        return out
+
+    def update_check(self):
+        self.update_info = update.check(__version__)
+        return {k: v for k, v in self.update_info.items() if k != "manifest"}
+
+    def update_install(self):
+        """Download the installer named by the signed manifest, check its SHA-256, run it."""
+        self.need()
+        info = self.update_info or {}
+        if not (info.get("available") and info.get("manifest")):
+            raise RuntimeError("Check for updates first")
+        path = update.download_and_verify(info["manifest"], os.path.join(DATA_DIR, "updates"))
+        self.log("Update %s downloaded and verified; starting the installer" % info.get("latest"))
+        os.startfile(path)
 
     # ------------------------------------------------------------------ CPU
     def _bg(self, label, fn):
@@ -408,6 +522,8 @@ class Controller:
         return not (self.tuner and self.tuner.is_alive())
 
     def shutdown(self):
+        self.game_cancel.set()
+        self.setup.cancel()
         if self.tuner and self.tuner.is_alive():
             self.tuner.stop()
             self.tuner.join(15)
@@ -537,6 +653,17 @@ def routes(c, body):
     return {
         "/api/gpu/auto": lambda: c.gpu_auto(bool(body.get("quick")), str(body.get("mode", "full"))),
         "/api/gpu/recheck": lambda: c.gpu_auto(True, "verify"),
+        "/api/stability/watch": lambda: c.stability_watch(bool(body.get("on"))),
+        "/api/stability/config": lambda: stability.set_config(body),
+        "/api/stability/check": c.stability_check,
+        "/api/games/processes": lambda: {"processes": presentmon.running_processes()},
+        "/api/games/measure": lambda: c.game_measure(body),
+        "/api/games/stop": c.game_cancel.set,
+        "/api/games/apply_mode": lambda: c.set_apply_settings(body),
+        "/api/research/settings": lambda: c.research_settings(body),
+        "/api/setup/research_cancel": c.setup.cancel,
+        "/api/update/check": c.update_check,
+        "/api/update/install": c.update_install,
         "/api/gpu/stop": c.gpu_stop,
         "/api/gpu/apply": lambda: c.gpu_apply(_int(body.get("core")), _int(body.get("mem"))),
         "/api/gpu/apply_saved": c.gpu_apply_saved,
